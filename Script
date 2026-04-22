@@ -1,0 +1,393 @@
+"""
+SDDL Decode - XSIAM Automation
+Parses Security Descriptor Definition Language strings into human-readable output.
+
+Input args:
+    sddl (str): The SDDL string from an AD event (e.g., 5136 AttributeValue)
+    domain_sid (str, optional): The domain SID for resolving DA/EA/etc. principals
+
+Returns:
+    dict with keys: owner, group, dacl_flags, sacl_flags, aces (list of decoded ACE dicts),
+    raw_sddl, summary (human-readable text block)
+"""
+
+import re
+from typing import Optional
+
+# ---------- Lookup tables ----------
+
+ACE_TYPES = {
+    "A": "Access Allowed",
+    "D": "Access Denied",
+    "OA": "Object Access Allowed",
+    "OD": "Object Access Denied",
+    "AU": "System Audit",
+    "AL": "System Alarm",
+    "OU": "Object System Audit",
+    "OL": "Object System Alarm",
+    "ML": "Mandatory Label",
+    "XA": "Callback Access Allowed",
+    "XD": "Callback Access Denied",
+}
+
+ACE_FLAGS = {
+    "CI": "Container Inherit",
+    "OI": "Object Inherit",
+    "NP": "No Propagate",
+    "IO": "Inherit Only",
+    "ID": "Inherited",
+    "SA": "Successful Access Audit",
+    "FA": "Failed Access Audit",
+}
+
+RIGHTS = {
+    # Generic
+    "GA": "Generic All",
+    "GR": "Generic Read",
+    "GW": "Generic Write",
+    "GX": "Generic Execute",
+    # Standard
+    "RC": "Read Control",
+    "SD": "Standard Delete",
+    "WD": "Write DAC",
+    "WO": "Write Owner",
+    # Directory Services
+    "CC": "Create Child",
+    "DC": "Delete Child",
+    "LC": "List Children",
+    "SW": "Self Write",
+    "RP": "Read Property",
+    "WP": "Write Property",
+    "DT": "Delete Tree",
+    "LO": "List Object",
+    "CR": "Control Access (Extended Right)",
+    # File
+    "FA": "File All",
+    "FR": "File Read",
+    "FW": "File Write",
+    "FX": "File Execute",
+    # Registry
+    "KA": "Key All",
+    "KR": "Key Read",
+    "KW": "Key Write",
+    "KX": "Key Execute",
+}
+
+# Rights considered high-risk when granted via AdminSDHolder modification
+DANGEROUS_RIGHTS = {"GA", "GW", "WD", "WO", "FA", "DT", "WP"}
+
+WELL_KNOWN_SIDS = {
+    # Abbreviations (SDDL shortcuts)
+    "AO": "Account Operators",
+    "RU": "Alias Pre-Win2k Access",
+    "AN": "Anonymous Logon",
+    "AU": "Authenticated Users",
+    "BA": "Built-in Administrators",
+    "BG": "Built-in Guests",
+    "BO": "Backup Operators",
+    "BU": "Built-in Users",
+    "CA": "Certificate Publishers",
+    "CG": "Creator Group",
+    "CO": "Creator Owner",
+    "DA": "Domain Admins",
+    "DC": "Domain Computers",
+    "DD": "Domain Controllers",
+    "DG": "Domain Guests",
+    "DU": "Domain Users",
+    "EA": "Enterprise Admins",
+    "ED": "Enterprise Domain Controllers",
+    "WD": "Everyone",
+    "PA": "Group Policy Admins",
+    "IU": "Interactive Users",
+    "LA": "Local Administrator",
+    "LG": "Local Guest",
+    "LS": "Local Service",
+    "SY": "Local System",
+    "NU": "Network Logon User",
+    "NO": "Network Configuration Operators",
+    "NS": "Network Service",
+    "PO": "Printer Operators",
+    "PS": "Self",
+    "PU": "Power Users",
+    "RS": "RAS Servers",
+    "RD": "Terminal Server Users",
+    "RE": "Replicator",
+    "RC": "Restricted Code",
+    "SA": "Schema Admins",
+    "SO": "Server Operators",
+    "SU": "Service",
+    # Full well-known SIDs
+    "S-1-0-0": "Null SID",
+    "S-1-1-0": "Everyone",
+    "S-1-2-0": "Local",
+    "S-1-3-0": "Creator Owner",
+    "S-1-3-1": "Creator Group",
+    "S-1-5-1": "Dialup",
+    "S-1-5-2": "Network",
+    "S-1-5-4": "Interactive",
+    "S-1-5-6": "Service",
+    "S-1-5-7": "Anonymous",
+    "S-1-5-9": "Enterprise Domain Controllers",
+    "S-1-5-10": "Self (Principal Self)",
+    "S-1-5-11": "Authenticated Users",
+    "S-1-5-18": "Local System",
+    "S-1-5-19": "Local Service",
+    "S-1-5-20": "Network Service",
+    "S-1-5-32-544": "Built-in Administrators",
+    "S-1-5-32-545": "Built-in Users",
+    "S-1-5-32-546": "Built-in Guests",
+    "S-1-5-32-548": "Account Operators",
+    "S-1-5-32-549": "Server Operators",
+    "S-1-5-32-550": "Print Operators",
+    "S-1-5-32-551": "Backup Operators",
+    "S-1-5-32-552": "Replicators",
+}
+
+# Domain-relative RIDs (append to domain SID)
+DOMAIN_RID_NAMES = {
+    "500": "Administrator (built-in)",
+    "501": "Guest",
+    "502": "KRBTGT",
+    "512": "Domain Admins",
+    "513": "Domain Users",
+    "514": "Domain Guests",
+    "515": "Domain Computers",
+    "516": "Domain Controllers",
+    "517": "Certificate Publishers",
+    "518": "Schema Admins",
+    "519": "Enterprise Admins",
+    "520": "Group Policy Creator Owners",
+    "521": "Read-Only Domain Controllers",
+    "525": "Protected Users",
+    "526": "Key Admins",
+    "527": "Enterprise Key Admins",
+}
+
+# Common AD schema GUIDs (for object-specific ACEs)
+SCHEMA_GUIDS = {
+    "bf967a7f-0de6-11d0-a285-00aa003049e2": "nTSecurityDescriptor",
+    "bf967aba-0de6-11d0-a285-00aa003049e2": "user",
+    "bf967a9c-0de6-11d0-a285-00aa003049e2": "group",
+    "bf967a86-0de6-11d0-a285-00aa003049e2": "computer",
+    "ab721a53-1e2f-11d0-9819-00aa0040529b": "User-Change-Password",
+    "00299570-246d-11d0-a768-00aa006e0529": "User-Force-Change-Password",
+    "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2": "DS-Replication-Get-Changes",
+    "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2": "DS-Replication-Get-Changes-All",
+    "89e95b76-444d-4c62-991a-0facbeda640c": "DS-Replication-Get-Changes-In-Filtered-Set",
+    "45ec5156-db7e-47bb-b53f-dbeb2d03c40f": "DS-Replication-Manage-Topology",
+    "1131f6ac-9c07-11d1-f79f-00c04fc2dcd2": "DS-Replication-Synchronize",
+    "bf9679c0-0de6-11d0-a285-00aa003049e2": "member (group membership)",
+    "bf967950-0de6-11d0-a285-00aa003049e2": "description",
+    "5f202010-79a5-11d0-9020-00c04fc2d4cf": "userWorkstations",
+    "28630ebf-41d5-11d1-a9c1-0000f80367c1": "userAccountControl",
+    "bf967a0a-0de6-11d0-a285-00aa003049e2": "pwdLastSet",
+    "ea1b7b93-5e48-46d5-bc6c-4df4fda78a35": "msTSExpireDate",
+}
+
+# ---------- Parsing logic ----------
+
+def parse_rights(rights_str: str) -> list:
+    """Split a rights string like 'CCDCLCSWRPWPLOCRRCWDWO' into components."""
+    if not rights_str:
+        return []
+    # Hex rights (e.g., 0x1f01ff) — return as-is with a note
+    if rights_str.startswith("0x"):
+        return [{"code": rights_str, "name": f"Hex rights mask {rights_str}", "dangerous": True}]
+    # Two-character codes
+    out = []
+    i = 0
+    while i < len(rights_str) - 1:
+        code = rights_str[i:i+2]
+        if code in RIGHTS:
+            out.append({
+                "code": code,
+                "name": RIGHTS[code],
+                "dangerous": code in DANGEROUS_RIGHTS,
+            })
+            i += 2
+        else:
+            # Unknown — capture and advance one char
+            out.append({"code": code, "name": f"Unknown ({code})", "dangerous": False})
+            i += 1
+    return out
+
+
+def resolve_sid(sid: str, domain_sid: Optional[str] = None) -> str:
+    """Resolve a SID or SDDL abbreviation to a human-readable name."""
+    if not sid:
+        return "(none)"
+    # Direct lookup
+    if sid in WELL_KNOWN_SIDS:
+        return WELL_KNOWN_SIDS[sid]
+    # Domain-relative RID?
+    if domain_sid and sid.startswith(domain_sid + "-"):
+        rid = sid.rsplit("-", 1)[-1]
+        if rid in DOMAIN_RID_NAMES:
+            return f"{DOMAIN_RID_NAMES[rid]} ({sid})"
+    # Bare RID pattern matching (if SID starts with S-1-5-21-)
+    m = re.match(r"^S-1-5-21-\d+-\d+-\d+-(\d+)$", sid)
+    if m:
+        rid = m.group(1)
+        if rid in DOMAIN_RID_NAMES:
+            return f"{DOMAIN_RID_NAMES[rid]} ({sid})"
+    return sid
+
+
+def resolve_guid(guid: str) -> str:
+    """Resolve an AD schema GUID to a friendly name."""
+    if not guid:
+        return ""
+    g = guid.lower()
+    return SCHEMA_GUIDS.get(g, guid)
+
+
+def parse_ace(ace_body: str, domain_sid: Optional[str] = None) -> dict:
+    """Parse a single ACE body (the contents between parens)."""
+    parts = ace_body.split(";")
+    # Pad to 6 fields
+    while len(parts) < 6:
+        parts.append("")
+    ace_type, flags, rights, obj_guid, inherit_guid, sid = parts[:6]
+
+    # Split flags into list
+    flag_list = []
+    if flags:
+        for i in range(0, len(flags), 2):
+            code = flags[i:i+2]
+            flag_list.append(ACE_FLAGS.get(code, code))
+
+    decoded_rights = parse_rights(rights)
+    has_dangerous = any(r.get("dangerous") for r in decoded_rights)
+
+    return {
+        "type": ACE_TYPES.get(ace_type, ace_type),
+        "type_code": ace_type,
+        "flags": flag_list,
+        "rights": decoded_rights,
+        "rights_summary": ", ".join(r["name"] for r in decoded_rights),
+        "object_guid": resolve_guid(obj_guid) if obj_guid else "",
+        "inherit_object_guid": resolve_guid(inherit_guid) if inherit_guid else "",
+        "trustee_sid": sid,
+        "trustee_name": resolve_sid(sid, domain_sid),
+        "contains_dangerous_rights": has_dangerous,
+    }
+
+
+def parse_sddl(sddl: str, domain_sid: Optional[str] = None) -> dict:
+    """Parse a full SDDL string."""
+    result = {
+        "raw_sddl": sddl,
+        "owner": None,
+        "group": None,
+        "dacl_flags": "",
+        "sacl_flags": "",
+        "aces": [],
+        "dangerous_ace_count": 0,
+    }
+
+    # Parse top-level sections by walking the string.
+    # SDDL structure: [O:owner][G:group][D:flags(aces)][S:flags(aces)]
+    # Section boundaries are the markers O:, G:, D:, S: — but we must ignore
+    # anything inside parentheses (ACE bodies can contain any characters).
+    sections = []
+    i = 0
+    n = len(sddl)
+    while i < n:
+        # Look for a section marker: one of O/G/D/S followed by ':'
+        if i + 1 < n and sddl[i] in "OGDS" and sddl[i+1] == ":":
+            marker = sddl[i]
+            j = i + 2
+            paren_depth = 0
+            # Advance j until we hit the next top-level section marker
+            while j < n:
+                ch = sddl[j]
+                if ch == "(":
+                    paren_depth += 1
+                elif ch == ")":
+                    paren_depth -= 1
+                elif paren_depth == 0 and ch in "OGDS" and j + 1 < n and sddl[j+1] == ":":
+                    break
+                j += 1
+            sections.append((marker, sddl[i+2:j]))
+            i = j
+        else:
+            i += 1
+    for marker, content in sections:
+        content = content.strip()
+        if marker == "O":
+            result["owner"] = resolve_sid(content, domain_sid)
+            result["owner_sid"] = content
+        elif marker == "G":
+            result["group"] = resolve_sid(content, domain_sid)
+            result["group_sid"] = content
+        elif marker in ("D", "S"):
+            # Split into flag prefix and ACE bodies
+            flag_match = re.match(r"^([^(]*)", content)
+            flags = flag_match.group(1) if flag_match else ""
+            ace_bodies = re.findall(r"\(([^)]*)\)", content)
+            if marker == "D":
+                result["dacl_flags"] = flags
+                for ab in ace_bodies:
+                    ace = parse_ace(ab, domain_sid)
+                    ace["acl"] = "DACL"
+                    result["aces"].append(ace)
+                    if ace["contains_dangerous_rights"]:
+                        result["dangerous_ace_count"] += 1
+            else:
+                result["sacl_flags"] = flags
+                for ab in ace_bodies:
+                    ace = parse_ace(ab, domain_sid)
+                    ace["acl"] = "SACL"
+                    result["aces"].append(ace)
+
+    # Build summary text
+    lines = []
+    lines.append(f"Owner: {result['owner']}")
+    lines.append(f"Group: {result['group']}")
+    lines.append(f"DACL flags: {result['dacl_flags']}")
+    lines.append(f"Total ACEs: {len(result['aces'])}")
+    lines.append(f"ACEs with high-risk rights: {result['dangerous_ace_count']}")
+    lines.append("")
+    lines.append("=== ACE Breakdown ===")
+    for i, ace in enumerate(result["aces"], 1):
+        marker = " ⚠" if ace["contains_dangerous_rights"] else ""
+        lines.append(f"[{i}] {ace['acl']} - {ace['type']}{marker}")
+        lines.append(f"    Trustee: {ace['trustee_name']}")
+        lines.append(f"    Rights:  {ace['rights_summary']}")
+        if ace["object_guid"]:
+            lines.append(f"    Object:  {ace['object_guid']}")
+        if ace["flags"]:
+            lines.append(f"    Flags:   {', '.join(ace['flags'])}")
+    result["summary"] = "\n".join(lines)
+    return result
+
+
+# ---------- XSIAM entry point ----------
+
+def main():
+    sddl = demisto.args().get("sddl", "")
+    domain_sid = demisto.args().get("domain_sid", None)
+
+    if not sddl:
+        return_error("Required argument 'sddl' is missing or empty.")
+        return
+
+    try:
+        parsed = parse_sddl(sddl, domain_sid)
+    except Exception as e:
+        return_error(f"Failed to parse SDDL: {str(e)}")
+        return
+
+    # Build an XSIAM-friendly result with a markdown view and raw JSON context
+    markdown = f"### Decoded Security Descriptor\n```\n{parsed['summary']}\n```"
+
+    return_results(CommandResults(
+        readable_output=markdown,
+        outputs_prefix="SDDL",
+        outputs_key_field="raw_sddl",
+        outputs=parsed,
+    ))
+
+
+if __name__ in ("__builtin__", "builtins", "__main__"):
+    main()
