@@ -1,0 +1,3251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SENTINEL — ATT&CK Detection Coverage</title>
+
+<!--
+  ============================================================================
+  SENTINEL — MITRE ATT&CK Detection Coverage Management
+  ============================================================================
+  Single-page application for blue team detection engineering.
+
+  ARCHITECTURE
+  ------------
+  1. DATA LAYER     — Sample ATT&CK Enterprise matrix data (tactics, techniques)
+  2. STATE          — In-memory app state, hydrated from localStorage
+  3. STORAGE        — Persistence helpers (load / save / export / import)
+  4. SCORING ENGINE — Coverage % derived from weighted detection signals
+  5. RENDER         — Pure functions that paint DOM from state
+  6. EVENTS         — User interactions, keyboard shortcuts, drag/drop
+  7. INIT           — Bootstrap order
+
+  All code is intentionally framework-free for portability — drop the file
+  on any web server, or open directly with file://.
+  ============================================================================
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+/* ============================================================================
+   DESIGN TOKENS
+   ============================================================================ */
+:root {
+  /* Surfaces — deep tactical charcoal palette */
+  --bg-base:       #08090b;
+  --bg-surface:    #0e1014;
+  --bg-elevated:   #14171c;
+  --bg-hover:      #1a1e24;
+  --bg-active:     #20252c;
+
+  /* Lines & dividers */
+  --border:        #20242b;
+  --border-strong: #2a3038;
+  --border-faint:  #181b20;
+
+  /* Text */
+  --text-primary:   #e6e8ec;
+  --text-secondary: #9ba1aa;
+  --text-muted:     #5e646e;
+  --text-faint:     #3d4148;
+
+  /* Accent — amber/gold, evokes terminal & tactical UIs without the cyan cliche */
+  --accent:        #e8a838;
+  --accent-hover:  #f0b855;
+  --accent-dim:    rgba(232, 168, 56, 0.12);
+  --accent-glow:   rgba(232, 168, 56, 0.25);
+
+  /* Coverage status colors */
+  --status-full:    #10b981;  /* green   — Fully Covered */
+  --status-partial: #eab308;  /* yellow  — Partially Covered */
+  --status-minimal: #f97316;  /* orange  — Minimal Coverage */
+  --status-none:    #ef4444;  /* red     — No Coverage */
+  --status-fp:      #a855f7;  /* purple  — False Positive Prone */
+  --status-planned: #3b82f6;  /* blue    — Planned / In Progress */
+
+  /* Type ramp */
+  --font-sans:  'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono:  'IBM Plex Mono', ui-monospace, monospace;
+  --font-serif: 'IBM Plex Serif', Georgia, serif;
+
+  /* Geometry */
+  --radius-sm: 3px;
+  --radius:    5px;
+  --radius-lg: 8px;
+
+  /* Layout dimensions */
+  --topnav-h:   52px;
+  --sidebar-w:  216px;
+  --panel-w:    440px;
+}
+
+/* ============================================================================
+   RESET & BASE
+   ============================================================================ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  letter-spacing: -0.005em;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+button { background: none; border: none; cursor: pointer; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid var(--bg-base); }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* Selection */
+::selection { background: var(--accent-glow); color: var(--text-primary); }
+
+/* Focus rings — accessible but not gaudy */
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ============================================================================
+   APP SHELL
+   ============================================================================ */
+#app {
+  display: grid;
+  grid-template-rows: var(--topnav-h) 1fr;
+  grid-template-columns: var(--sidebar-w) 1fr;
+  height: 100vh;
+}
+
+/* ============================================================================
+   TOP NAV
+   ============================================================================ */
+.topnav {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  z-index: 50;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: calc(var(--sidebar-w) - 16px);
+  padding-right: 16px;
+  border-right: 1px solid var(--border);
+  height: 100%;
+}
+
+.brand-mark {
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  background: var(--accent);
+  color: var(--bg-base);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 11px;
+  border-radius: var(--radius-sm);
+  letter-spacing: -0.05em;
+}
+
+.brand-name {
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.brand-name .dim {
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 4px;
+}
+
+.topnav-search {
+  flex: 1;
+  max-width: 520px;
+  position: relative;
+}
+
+.topnav-search input {
+  width: 100%;
+  height: 32px;
+  padding: 0 12px 0 34px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 12px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.topnav-search input::placeholder { color: var(--text-muted); }
+
+.topnav-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--bg-base);
+}
+
+.topnav-search svg {
+  position: absolute;
+  left: 11px; top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.topnav-search kbd {
+  position: absolute;
+  right: 8px; top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.topnav-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+.topnav-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.topnav-meta .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--status-full);
+  box-shadow: 0 0 8px var(--status-full);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.btn {
+  height: 30px;
+  padding: 0 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 120ms ease;
+}
+
+.btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg-base);
+  border-color: var(--accent);
+  font-weight: 500;
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn-ghost:hover { background: var(--bg-hover); }
+
+.btn-icon {
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+}
+
+/* ============================================================================
+   SIDEBAR
+   ============================================================================ */
+.sidebar {
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  padding: 16px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  overflow-y: auto;
+}
+
+.nav-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  padding: 0 8px 8px;
+}
+
+.nav-list { display: flex; flex-direction: column; gap: 1px; }
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 100ms ease;
+  position: relative;
+}
+
+.nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.nav-item.active {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -8px; top: 50%;
+  transform: translateY(-50%);
+  width: 2px; height: 14px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+
+.nav-item svg { flex-shrink: 0; color: var(--text-muted); }
+.nav-item.active svg { color: var(--accent); }
+
+.nav-item-badge {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-base);
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 12px 8px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ============================================================================
+   MAIN VIEWPORT
+   ============================================================================ */
+.main {
+  overflow: hidden;
+  background: var(--bg-base);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.view { display: none; height: 100%; overflow: hidden; flex-direction: column; }
+.view.active { display: flex; }
+
+.view-header {
+  padding: 18px 24px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.view-title {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+
+.view-subtitle {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+}
+
+.view-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.view-body {
+  flex: 1;
+  overflow: auto;
+  padding: 20px 24px;
+}
+
+/* ============================================================================
+   DASHBOARD
+   ============================================================================ */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
+}
+
+.stat-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stat-value {
+  font-family: var(--font-serif);
+  font-size: 32px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.stat-value-mono {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 500;
+}
+
+.stat-delta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stat-delta.up { color: var(--status-full); }
+.stat-delta.down { color: var(--status-none); }
+.stat-delta.flat { color: var(--text-muted); }
+
+.dash-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-faint);
+}
+
+.panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-title .accent-bar {
+  width: 2px; height: 12px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+
+.panel-action {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* Coverage gauge — large radial */
+.gauge-wrap {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 8px 4px;
+}
+
+.gauge-svg { flex-shrink: 0; }
+
+.gauge-meta { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+
+.gauge-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--border);
+}
+
+.gauge-row .label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gauge-row .value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Bar chart for tactic coverage */
+.tactic-bars { display: flex; flex-direction: column; gap: 6px; }
+
+.tactic-bar-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 50px;
+  align-items: center;
+  gap: 12px;
+  font-size: 11.5px;
+}
+
+.tactic-bar-row .name { color: var(--text-secondary); }
+
+.tactic-bar-track {
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+
+.tactic-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 600ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tactic-bar-row .pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+/* Status distribution donut */
+.donut-wrap { display: flex; align-items: center; gap: 16px; padding: 8px 0; }
+
+.donut-legend { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.legend-swatch {
+  width: 8px; height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.legend-row .label { color: var(--text-secondary); flex: 1; }
+.legend-row .value { font-family: var(--font-mono); color: var(--text-primary); }
+
+/* Top risks list */
+.risk-list { display: flex; flex-direction: column; gap: 2px; }
+
+.risk-item {
+  display: grid;
+  grid-template-columns: 70px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+
+.risk-item:hover { background: var(--bg-elevated); }
+
+.risk-item .tcode {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.risk-item .name {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.risk-item .severity {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.risk-item .severity.critical { color: var(--status-none); border-color: rgba(239,68,68,0.3); }
+.risk-item .severity.high     { color: var(--status-minimal); border-color: rgba(249,115,22,0.3); }
+.risk-item .severity.medium   { color: var(--status-partial); border-color: rgba(234,179,8,0.3); }
+
+/* ============================================================================
+   MATRIX
+   ============================================================================ */
+.matrix-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  flex-wrap: wrap;
+}
+
+.filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 100ms ease;
+}
+
+.filter-pill:hover { border-color: var(--border-strong); }
+
+.filter-pill.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.filter-pill .swatch {
+  width: 8px; height: 8px;
+  border-radius: 2px;
+}
+
+.legend-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.matrix-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 24px 24px;
+}
+
+.matrix {
+  display: grid;
+  gap: 8px;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(200px, 1fr);
+  min-height: 100%;
+}
+
+.tactic-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+}
+
+.tactic-header {
+  position: sticky;
+  top: 0;
+  background: var(--bg-base);
+  padding: 8px 4px;
+  z-index: 5;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+
+.tactic-name {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.tactic-meta {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-muted);
+}
+
+.technique-list { display: flex; flex-direction: column; gap: 3px; }
+
+.technique-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  cursor: pointer;
+  transition: all 100ms ease;
+  position: relative;
+}
+
+.technique-card:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border-strong);
+  transform: translateX(1px);
+}
+
+.technique-card .tcode {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.technique-card .tname {
+  font-size: 11.5px;
+  color: var(--text-primary);
+  line-height: 1.3;
+  margin-top: 1px;
+}
+
+.technique-card[data-status="full"]    { border-left-color: var(--status-full); }
+.technique-card[data-status="partial"] { border-left-color: var(--status-partial); }
+.technique-card[data-status="minimal"] { border-left-color: var(--status-minimal); }
+.technique-card[data-status="none"]    { border-left-color: var(--status-none); }
+.technique-card[data-status="fp"]      { border-left-color: var(--status-fp); }
+.technique-card[data-status="planned"] { border-left-color: var(--status-planned); }
+
+.technique-card[data-status="full"]    { background: linear-gradient(to right, rgba(16,185,129,0.08), var(--bg-surface) 60%); }
+.technique-card[data-status="partial"] { background: linear-gradient(to right, rgba(234,179,8,0.08), var(--bg-surface) 60%); }
+.technique-card[data-status="minimal"] { background: linear-gradient(to right, rgba(249,115,22,0.08), var(--bg-surface) 60%); }
+.technique-card[data-status="none"]    { background: linear-gradient(to right, rgba(239,68,68,0.06), var(--bg-surface) 60%); }
+.technique-card[data-status="fp"]      { background: linear-gradient(to right, rgba(168,85,247,0.08), var(--bg-surface) 60%); }
+.technique-card[data-status="planned"] { background: linear-gradient(to right, rgba(59,130,246,0.08), var(--bg-surface) 60%); }
+
+.technique-card .sub-indicator {
+  position: absolute;
+  top: 6px; right: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  padding: 0 4px;
+  background: var(--bg-base);
+  border-radius: 2px;
+  border: 1px solid var(--border);
+}
+
+.subtechnique-list {
+  margin-top: 3px;
+  padding-left: 12px;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 1px dashed var(--border-strong);
+}
+
+.technique-card.expanded .subtechnique-list { display: flex; }
+
+.subtechnique-card {
+  background: var(--bg-base);
+  border: 1px solid var(--border-faint);
+  border-left: 2px solid var(--border);
+  padding: 5px 8px;
+  border-radius: 2px;
+  font-size: 10.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.subtechnique-card:hover { background: var(--bg-hover); }
+
+.subtechnique-card[data-status="full"]    { border-left-color: var(--status-full); }
+.subtechnique-card[data-status="partial"] { border-left-color: var(--status-partial); }
+.subtechnique-card[data-status="minimal"] { border-left-color: var(--status-minimal); }
+.subtechnique-card[data-status="none"]    { border-left-color: var(--status-none); }
+.subtechnique-card[data-status="fp"]      { border-left-color: var(--status-fp); }
+.subtechnique-card[data-status="planned"] { border-left-color: var(--status-planned); }
+
+.subtechnique-card .tcode {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.subtechnique-card .tname {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+/* ============================================================================
+   DETAIL PANEL
+   ============================================================================ */
+.detail-panel {
+  position: fixed;
+  top: var(--topnav-h);
+  right: 0;
+  bottom: 0;
+  width: var(--panel-w);
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border);
+  transform: translateX(100%);
+  transition: transform 240ms cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
+}
+
+.detail-panel.open { transform: translateX(0); }
+
+.panel-top {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-top-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.panel-tcode {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--accent);
+  font-weight: 500;
+}
+
+.panel-close {
+  margin-left: auto;
+  width: 24px; height: 24px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+}
+
+.panel-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.panel-name {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  font-weight: 500;
+  margin-top: 8px;
+  letter-spacing: -0.01em;
+}
+
+.panel-tactics {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.panel-tactic {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  padding: 1px 6px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+  border: 1px solid var(--border);
+}
+
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panel-section { display: flex; flex-direction: column; gap: 8px; }
+
+.panel-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.field-input,
+.field-select,
+.field-textarea {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  font-size: 12px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  width: 100%;
+  transition: border-color 100ms ease;
+}
+
+.field-input:focus,
+.field-select:focus,
+.field-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.field-textarea { resize: vertical; min-height: 60px; font-family: var(--font-mono); font-size: 11px; }
+
+.field-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3e%3cpath fill='%239ba1aa' d='M2 4l3 3 3-3z'/%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 24px;
+}
+
+.status-row {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+}
+
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 100ms ease;
+}
+
+.status-pill:hover { background: var(--bg-elevated); }
+
+.status-pill.selected { border-color: currentColor; background: var(--bg-elevated); }
+
+.status-pill .dot {
+  width: 8px; height: 8px;
+  border-radius: 2px;
+}
+
+.score-slider {
+  width: 100%;
+  -webkit-appearance: none;
+  background: transparent;
+  margin: 4px 0;
+}
+
+.score-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+}
+
+.score-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  background: var(--accent);
+  border-radius: 50%;
+  margin-top: -5px;
+  cursor: pointer;
+  box-shadow: 0 0 0 2px var(--bg-base);
+}
+
+.score-slider::-moz-range-track {
+  height: 4px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+}
+
+.score-slider::-moz-range-thumb {
+  width: 14px; height: 14px;
+  background: var(--accent);
+  border-radius: 50%;
+  border: 2px solid var(--bg-base);
+  cursor: pointer;
+}
+
+.score-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.score-row .val { color: var(--accent); font-weight: 500; }
+
+.coverage-meter {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-top: 4px;
+}
+
+.coverage-meter .top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.coverage-meter .label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+
+.coverage-meter .value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.coverage-meter .bar {
+  height: 4px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.coverage-meter .fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--status-none), var(--status-partial), var(--status-full));
+  transition: width 400ms ease;
+}
+
+.panel-footer {
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  background: var(--bg-surface);
+}
+
+.panel-footer .btn { flex: 1; justify-content: center; }
+
+/* ============================================================================
+   MODAL
+   ============================================================================ */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  animation: fadeIn 160ms ease;
+}
+
+.modal-backdrop.open { display: flex; }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.modal {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  width: 540px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
+  animation: modalIn 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes modalIn {
+  from { transform: translateY(8px) scale(0.98); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+.modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-title {
+  font-family: var(--font-serif);
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Drop zone */
+.drop-zone {
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 32px;
+  text-align: center;
+  background: var(--bg-base);
+  transition: all 160ms ease;
+  cursor: pointer;
+}
+
+.drop-zone:hover, .drop-zone.dragover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.drop-zone svg { color: var(--text-muted); margin-bottom: 8px; }
+.drop-zone.dragover svg { color: var(--accent); }
+
+.drop-zone .primary {
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.drop-zone .secondary {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* ============================================================================
+   TOAST
+   ============================================================================ */
+.toast-stack {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+}
+
+.toast {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-size: 12px;
+  min-width: 240px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: toastIn 200ms ease;
+}
+
+.toast.success { border-left-color: var(--status-full); }
+.toast.error   { border-left-color: var(--status-none); }
+.toast.info    { border-left-color: var(--status-planned); }
+
+.toast .title {
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.toast .desc {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+@keyframes toastIn {
+  from { transform: translateX(20px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* ============================================================================
+   TOOLTIP
+   ============================================================================ */
+.tooltip {
+  position: fixed;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 11px;
+  max-width: 280px;
+  pointer-events: none;
+  z-index: 60;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  display: none;
+  line-height: 1.5;
+}
+
+.tooltip.show { display: block; }
+.tooltip .name { font-weight: 500; margin-bottom: 4px; }
+.tooltip .desc { color: var(--text-muted); }
+
+/* ============================================================================
+   EMPTY STATES
+   ============================================================================ */
+.empty {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ============================================================================
+   RESPONSIVE
+   ============================================================================ */
+@media (max-width: 880px) {
+  :root { --sidebar-w: 60px; --panel-w: 100vw; }
+  .sidebar { padding: 12px 6px; }
+  .nav-section-label, .nav-item span, .sidebar-footer { display: none; }
+  .nav-item { justify-content: center; padding: 8px; }
+  .topnav-meta { display: none; }
+  .dash-row { grid-template-columns: 1fr; }
+  .brand-name { display: none; }
+  .brand { width: auto; padding-right: 12px; }
+}
+
+/* ============================================================================
+   ANALYTICS VIEW
+   ============================================================================ */
+.analytics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.analytics-heatmap {
+  grid-column: 1 / -1;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.heatmap-grid {
+  display: grid;
+  gap: 2px;
+  margin-top: 12px;
+}
+
+.heatmap-row {
+  display: grid;
+  grid-template-columns: 160px repeat(7, 1fr);
+  gap: 2px;
+  align-items: center;
+}
+
+.heatmap-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.heatmap-cell {
+  height: 24px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+/* ============================================================================
+   IMPORT/EXPORT VIEW
+   ============================================================================ */
+.io-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.io-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.io-card h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.io-card p {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+.io-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ============================================================================
+   UTILITIES
+   ============================================================================ */
+.spacer { flex: 1; }
+.hidden { display: none !important; }
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--text-muted); }
+.accent { color: var(--accent); }
+
+</style>
+</head>
+
+<body>
+
+<!-- ============================================================================
+     APP SHELL
+     ============================================================================ -->
+<div id="app">
+
+  <!-- TOP NAV -->
+  <header class="topnav">
+    <div class="brand">
+      <div class="brand-mark">S</div>
+      <div class="brand-name">SENTINEL <span class="dim">/ coverage</span></div>
+    </div>
+
+    <div class="topnav-search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="globalSearch" type="text" placeholder="Search techniques, T-codes, owners, rules..." />
+      <kbd>⌘ K</kbd>
+    </div>
+
+    <div class="topnav-meta">
+      <span><span class="dot"></span> v<span id="attackVersion">17.1</span></span>
+      <span id="totalCount">— techniques</span>
+    </div>
+
+    <div class="topnav-actions">
+      <button class="btn btn-ghost btn-icon" id="btnHelp" title="Keyboard shortcuts (?)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/></svg>
+      </button>
+      <button class="btn btn-primary" id="btnAddTechnique">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+        Add Technique
+      </button>
+    </div>
+  </header>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div>
+      <div class="nav-section-label">Workspace</div>
+      <div class="nav-list" id="navList">
+        <div class="nav-item active" data-view="dashboard">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+          <span>Dashboard</span>
+        </div>
+        <div class="nav-item" data-view="matrix">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="1"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg>
+          <span>ATT&CK Matrix</span>
+          <span class="nav-item-badge" id="matrixBadge">0</span>
+        </div>
+        <div class="nav-item" data-view="analytics">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m7 14 4-4 4 4 5-5"/></svg>
+          <span>Analytics</span>
+        </div>
+        <div class="nav-item" data-view="io">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+          <span>Import / Export</span>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="nav-section-label">Filter by Status</div>
+      <div class="nav-list" id="statusFilters">
+        <!-- populated dynamically -->
+      </div>
+    </div>
+
+    <div class="sidebar-footer">
+      <div>build 2026.05 · local</div>
+      <div id="lastSaved">unsaved</div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+
+    <!-- DASHBOARD VIEW -->
+    <section class="view active" id="view-dashboard">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Detection Coverage Overview</div>
+          <div class="view-subtitle" id="dashSubtitle">— TTPs · — fully covered · last review —</div>
+        </div>
+        <div class="view-toolbar">
+          <button class="btn" id="btnRefreshDash">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <div class="view-body">
+        <div class="stat-grid" id="statGrid"></div>
+
+        <div class="dash-row">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title"><span class="accent-bar"></span>Coverage by Tactic</div>
+              <div class="panel-action">14 tactics · enterprise-attack</div>
+            </div>
+            <div class="tactic-bars" id="tacticBars"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title"><span class="accent-bar"></span>Overall Coverage</div>
+              <div class="panel-action">weighted</div>
+            </div>
+            <div class="gauge-wrap" id="gaugeWrap"></div>
+          </div>
+        </div>
+
+        <div class="dash-row">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title"><span class="accent-bar"></span>Top Uncovered Risks</div>
+              <div class="panel-action">ranked by impact</div>
+            </div>
+            <div class="risk-list" id="riskList"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title"><span class="accent-bar"></span>Status Distribution</div>
+              <div class="panel-action">all techniques</div>
+            </div>
+            <div class="donut-wrap" id="donutWrap"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- MATRIX VIEW -->
+    <section class="view" id="view-matrix">
+      <div class="view-header">
+        <div>
+          <div class="view-title">ATT&CK Enterprise Matrix</div>
+          <div class="view-subtitle">Click any technique to manage coverage · double-click parent to toggle sub-techniques</div>
+        </div>
+        <div class="view-toolbar">
+          <button class="btn" id="btnExpandAll">Expand all sub-techniques</button>
+          <button class="btn" id="btnCollapseAll">Collapse all</button>
+        </div>
+      </div>
+
+      <div class="matrix-controls">
+        <div id="statusPills"></div>
+        <div class="legend-bar">
+          <span>STATUS LEGEND</span>
+          <span style="display:inline-flex;align-items:center;gap:4px"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--status-full)"></span>Full</span>
+          <span style="display:inline-flex;align-items:center;gap:4px"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--status-partial)"></span>Partial</span>
+          <span style="display:inline-flex;align-items:center;gap:4px"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--status-minimal)"></span>Minimal</span>
+          <span style="display:inline-flex;align-items:center;gap:4px"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--status-none)"></span>None</span>
+          <span style="display:inline-flex;align-items:center;gap:4px"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--status-planned)"></span>Planned</span>
+          <span style="display:inline-flex;align-items:center;gap:4px"><span class="swatch" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--status-fp)"></span>FP-prone</span>
+        </div>
+      </div>
+
+      <div class="matrix-scroll">
+        <div class="matrix" id="matrix"></div>
+      </div>
+    </section>
+
+    <!-- ANALYTICS VIEW -->
+    <section class="view" id="view-analytics">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Coverage Analytics</div>
+          <div class="view-subtitle">Detection maturity, telemetry quality, and trend signals</div>
+        </div>
+      </div>
+
+      <div class="view-body">
+        <div class="analytics-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title"><span class="accent-bar"></span>Maturity Distribution</div>
+              <div class="panel-action">0 – 5 scale</div>
+            </div>
+            <div id="maturityChart"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title"><span class="accent-bar"></span>Confidence vs Maturity</div>
+              <div class="panel-action">scatter</div>
+            </div>
+            <div id="scatterChart"></div>
+          </div>
+
+          <div class="analytics-heatmap">
+            <div class="panel-header">
+              <div class="panel-title"><span class="accent-bar"></span>Tactic × Maturity Heatmap</div>
+              <div class="panel-action">cells show technique counts</div>
+            </div>
+            <div class="heatmap-grid" id="heatmapGrid"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- IMPORT/EXPORT VIEW -->
+    <section class="view" id="view-io">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Data Management</div>
+          <div class="view-subtitle">Import bulk T-codes · export coverage as JSON or CSV · generate Navigator layer</div>
+        </div>
+      </div>
+
+      <div class="view-body">
+        <div class="io-grid">
+          <div class="io-card">
+            <h3>Import Coverage</h3>
+            <p>Drag and drop a JSON or CSV file, or paste T-codes directly. Existing entries are merged on T-code match.</p>
+            <div class="drop-zone" id="dropZone">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></svg>
+              <div class="primary">Drop JSON or CSV here</div>
+              <div class="secondary">or click to browse · max 5MB</div>
+              <input type="file" id="fileInput" accept=".json,.csv" style="display:none" />
+            </div>
+            <div class="io-actions" style="margin-top:12px">
+              <button class="btn" id="btnPasteImport">Paste T-codes</button>
+              <button class="btn" id="btnLoadSample">Load Sample Dataset</button>
+            </div>
+          </div>
+
+          <div class="io-card">
+            <h3>Export Coverage</h3>
+            <p>Download your full coverage dataset. JSON preserves all fields; CSV is flattened for spreadsheets. Navigator format produces a layer.json ready to upload to mitre-attack.github.io/attack-navigator.</p>
+            <div class="io-actions">
+              <button class="btn btn-primary" id="btnExportJSON">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+                JSON
+              </button>
+              <button class="btn" id="btnExportCSV">CSV</button>
+              <button class="btn" id="btnExportNav">Navigator Layer</button>
+            </div>
+            <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border-faint)">
+              <h3 style="margin-bottom:4px">Reset Data</h3>
+              <p>Clears all coverage data from this browser. Cannot be undone.</p>
+              <button class="btn" id="btnReset" style="color:var(--status-none);border-color:rgba(239,68,68,0.3)">Clear All Data</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- DETAIL PANEL -->
+<aside class="detail-panel" id="detailPanel">
+  <div class="panel-top">
+    <div class="panel-top-row">
+      <span class="panel-tcode" id="detailTCode">T0000</span>
+      <button class="panel-close" id="detailClose">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="panel-name" id="detailName">Technique Name</div>
+    <div class="panel-tactics" id="detailTactics"></div>
+  </div>
+
+  <div class="panel-body">
+    <div class="panel-section">
+      <div class="panel-section-label">Description</div>
+      <div id="detailDesc" style="font-size:12px;color:var(--text-secondary);line-height:1.55"></div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-section-label">Coverage Status</div>
+      <div class="status-row" id="statusGrid"></div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-section-label">Detection Signals</div>
+      <div id="signalSliders"></div>
+      <div class="coverage-meter">
+        <div class="top">
+          <span class="label">Computed Coverage Score</span>
+          <span class="value" id="computedScore">0%</span>
+        </div>
+        <div class="bar"><div class="fill" id="computedFill" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-section-label">Metadata</div>
+      <div class="field-grid">
+        <div class="field">
+          <span class="field-label">Owner / Team</span>
+          <input class="field-input" id="fldOwner" placeholder="e.g. blue-team-alpha" />
+        </div>
+        <div class="field">
+          <span class="field-label">Last Reviewed</span>
+          <input class="field-input" id="fldReviewed" type="date" />
+        </div>
+        <div class="field">
+          <span class="field-label">SIEM Rule IDs</span>
+          <input class="field-input" id="fldRules" placeholder="XSIAM-CR-042, SIGMA-001" />
+        </div>
+        <div class="field">
+          <span class="field-label">Data Sources</span>
+          <input class="field-input" id="fldSources" placeholder="EDR, Sysmon, Auth logs" />
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-section-label">Detection Logic</div>
+      <textarea class="field-textarea" id="fldLogic" placeholder="// XQL, KQL, SPL, or Sigma pseudo-logic"></textarea>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-section-label">Notes</div>
+      <textarea class="field-textarea" id="fldNotes" placeholder="Operational notes, tuning history, related incidents..." style="font-family:var(--font-sans);font-size:12px"></textarea>
+    </div>
+  </div>
+
+  <div class="panel-footer">
+    <button class="btn" id="btnDeleteTech" style="flex:0;color:var(--status-none);border-color:rgba(239,68,68,0.3)">Delete</button>
+    <button class="btn" id="btnDiscard">Discard</button>
+    <button class="btn btn-primary" id="btnSaveTech">Save Changes</button>
+  </div>
+</aside>
+
+<!-- MODAL: Add / Bulk Import -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" id="modal">
+    <div class="modal-header">
+      <div class="modal-title" id="modalTitle">Add Technique</div>
+      <button class="btn-icon" id="modalClose" style="background:none">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-footer" id="modalFooter"></div>
+  </div>
+</div>
+
+<!-- Toast stack -->
+<div class="toast-stack" id="toastStack"></div>
+
+<!-- Tooltip -->
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+/* ============================================================================
+   1. DATA LAYER — MITRE ATT&CK Enterprise sample dataset
+   ============================================================================
+   A curated subset of the real Enterprise ATT&CK matrix covering all 14
+   tactics with high-priority techniques and sub-techniques. T-codes and
+   names match the official ATT&CK framework (current as of v17).
+   For production use, replace with the full STIX feed from MITRE.
+   ============================================================================ */
+
+const TACTICS = [
+  { id: 'reconnaissance',     name: 'Reconnaissance',       code: 'TA0043' },
+  { id: 'resource-development', name: 'Resource Development', code: 'TA0042' },
+  { id: 'initial-access',     name: 'Initial Access',       code: 'TA0001' },
+  { id: 'execution',          name: 'Execution',            code: 'TA0002' },
+  { id: 'persistence',        name: 'Persistence',          code: 'TA0003' },
+  { id: 'privilege-escalation', name: 'Privilege Escalation', code: 'TA0004' },
+  { id: 'defense-evasion',    name: 'Defense Evasion',      code: 'TA0005' },
+  { id: 'credential-access',  name: 'Credential Access',    code: 'TA0006' },
+  { id: 'discovery',          name: 'Discovery',            code: 'TA0007' },
+  { id: 'lateral-movement',   name: 'Lateral Movement',     code: 'TA0008' },
+  { id: 'collection',         name: 'Collection',           code: 'TA0009' },
+  { id: 'command-and-control', name: 'Command and Control', code: 'TA0011' },
+  { id: 'exfiltration',       name: 'Exfiltration',         code: 'TA0010' },
+  { id: 'impact',             name: 'Impact',               code: 'TA0040' },
+];
+
+const TECHNIQUES = [
+  // Reconnaissance
+  { id: 'T1595', name: 'Active Scanning', tactics: ['reconnaissance'], desc: 'Adversaries may execute active reconnaissance scans to gather information that can be used during targeting.' },
+  { id: 'T1592', name: 'Gather Victim Host Information', tactics: ['reconnaissance'], desc: 'Adversaries may gather information about the victim\'s hosts that can be used during targeting.' },
+  { id: 'T1589', name: 'Gather Victim Identity Information', tactics: ['reconnaissance'], desc: 'Identity info collection: credentials, email addresses, employee names.' },
+  { id: 'T1598', name: 'Phishing for Information', tactics: ['reconnaissance'], desc: 'Phishing messages sent to elicit sensitive information that can be used during targeting.' },
+  { id: 'T1593', name: 'Search Open Websites/Domains', tactics: ['reconnaissance'], desc: 'Search freely available websites or domains for information about victims.' },
+
+  // Resource Development
+  { id: 'T1583', name: 'Acquire Infrastructure', tactics: ['resource-development'], desc: 'Buy, lease, or rent infrastructure used to support operations.' },
+  { id: 'T1586', name: 'Compromise Accounts', tactics: ['resource-development'], desc: 'Compromise accounts owned by third parties.' },
+  { id: 'T1588', name: 'Obtain Capabilities', tactics: ['resource-development'], desc: 'Buy or steal capabilities including malware, exploits, certificates.' },
+
+  // Initial Access
+  { id: 'T1190', name: 'Exploit Public-Facing Application', tactics: ['initial-access'], desc: 'Use of software, data, or commands to take advantage of a weakness in an internet-facing system.' },
+  { id: 'T1133', name: 'External Remote Services', tactics: ['initial-access','persistence'], desc: 'Adversaries may leverage external-facing remote services to initially access and/or persist within a network.' },
+  { id: 'T1566', name: 'Phishing', tactics: ['initial-access'], desc: 'Adversaries may send phishing messages to gain access to victim systems.',
+    sub: [
+      { id: 'T1566.001', name: 'Spearphishing Attachment', desc: 'Phishing email with malicious attachment.' },
+      { id: 'T1566.002', name: 'Spearphishing Link', desc: 'Phishing email with malicious link.' },
+      { id: 'T1566.003', name: 'Spearphishing via Service', desc: 'Phishing via 3rd-party services (LinkedIn, etc).' },
+    ]
+  },
+  { id: 'T1078', name: 'Valid Accounts', tactics: ['initial-access','persistence','privilege-escalation','defense-evasion'], desc: 'Adversaries may obtain and abuse credentials of existing accounts.',
+    sub: [
+      { id: 'T1078.001', name: 'Default Accounts', desc: 'Default account credentials.' },
+      { id: 'T1078.002', name: 'Domain Accounts', desc: 'Domain account credentials.' },
+      { id: 'T1078.003', name: 'Local Accounts', desc: 'Local account credentials.' },
+      { id: 'T1078.004', name: 'Cloud Accounts', desc: 'Cloud account credentials.' },
+    ]
+  },
+  { id: 'T1195', name: 'Supply Chain Compromise', tactics: ['initial-access'], desc: 'Manipulation of products or product delivery mechanisms prior to receipt by final consumer.' },
+  { id: 'T1199', name: 'Trusted Relationship', tactics: ['initial-access'], desc: 'Breach or leverage organizations who have access to intended victims.' },
+  { id: 'T1200', name: 'Hardware Additions', tactics: ['initial-access'], desc: 'Computer accessories, networking hardware, or other devices introduced as initial access vector.' },
+
+  // Execution
+  { id: 'T1059', name: 'Command and Scripting Interpreter', tactics: ['execution'], desc: 'Adversaries may abuse command and script interpreters to execute commands.',
+    sub: [
+      { id: 'T1059.001', name: 'PowerShell', desc: 'PowerShell-based execution.' },
+      { id: 'T1059.003', name: 'Windows Command Shell', desc: 'cmd.exe-based execution.' },
+      { id: 'T1059.004', name: 'Unix Shell', desc: 'bash/sh execution on Unix systems.' },
+      { id: 'T1059.005', name: 'Visual Basic', desc: 'VBScript/VBA execution.' },
+      { id: 'T1059.006', name: 'Python', desc: 'Python-based execution.' },
+      { id: 'T1059.007', name: 'JavaScript', desc: 'JavaScript/JScript-based execution.' },
+    ]
+  },
+  { id: 'T1203', name: 'Exploitation for Client Execution', tactics: ['execution'], desc: 'Exploitation of client applications to execute code.' },
+  { id: 'T1559', name: 'Inter-Process Communication', tactics: ['execution'], desc: 'Abuse of IPC mechanisms for execution.' },
+  { id: 'T1106', name: 'Native API', tactics: ['execution'], desc: 'Direct interaction with OS native APIs to execute behaviors.' },
+  { id: 'T1053', name: 'Scheduled Task/Job', tactics: ['execution','persistence','privilege-escalation'], desc: 'Abuse of task scheduling functionality for recurring execution.',
+    sub: [
+      { id: 'T1053.005', name: 'Scheduled Task', desc: 'Windows Task Scheduler.' },
+      { id: 'T1053.003', name: 'Cron', desc: 'Unix cron jobs.' },
+    ]
+  },
+  { id: 'T1569', name: 'System Services', tactics: ['execution'], desc: 'Abuse system services to execute malicious commands or payloads.' },
+  { id: 'T1204', name: 'User Execution', tactics: ['execution'], desc: 'Reliance on specific user actions to gain execution.' },
+  { id: 'T1047', name: 'Windows Management Instrumentation', tactics: ['execution'], desc: 'WMI to execute scripts or commands.' },
+
+  // Persistence
+  { id: 'T1098', name: 'Account Manipulation', tactics: ['persistence','privilege-escalation'], desc: 'Modify accounts to maintain access.' },
+  { id: 'T1547', name: 'Boot or Logon Autostart Execution', tactics: ['persistence','privilege-escalation'], desc: 'Configure system settings to automatically execute a program during boot or logon.',
+    sub: [
+      { id: 'T1547.001', name: 'Registry Run Keys / Startup Folder', desc: 'Windows Registry run keys.' },
+      { id: 'T1547.009', name: 'Shortcut Modification', desc: 'Modifying .lnk shortcuts to trigger execution.' },
+    ]
+  },
+  { id: 'T1037', name: 'Boot or Logon Initialization Scripts', tactics: ['persistence','privilege-escalation'], desc: 'Scripts that execute at boot or login time.' },
+  { id: 'T1543', name: 'Create or Modify System Process', tactics: ['persistence','privilege-escalation'], desc: 'Create or modify system-level processes for persistence.',
+    sub: [
+      { id: 'T1543.003', name: 'Windows Service', desc: 'Create or modify Windows services.' },
+      { id: 'T1543.001', name: 'Launch Agent', desc: 'macOS launch agents.' },
+    ]
+  },
+  { id: 'T1136', name: 'Create Account', tactics: ['persistence'], desc: 'Adversaries may create accounts to maintain access.' },
+  { id: 'T1505', name: 'Server Software Component', tactics: ['persistence'], desc: 'Abuse legitimate server software extensibility for persistence (web shells, IIS modules).' },
+  { id: 'T1546', name: 'Event Triggered Execution', tactics: ['persistence','privilege-escalation'], desc: 'Establish persistence via OS event triggers (WMI subs, image hijacks).' },
+
+  // Privilege Escalation
+  { id: 'T1548', name: 'Abuse Elevation Control Mechanism', tactics: ['privilege-escalation','defense-evasion'], desc: 'Bypass UAC, sudo, or similar elevation mechanisms.' },
+  { id: 'T1134', name: 'Access Token Manipulation', tactics: ['privilege-escalation','defense-evasion'], desc: 'Manipulate access tokens to operate under a different user/security context.' },
+  { id: 'T1068', name: 'Exploitation for Privilege Escalation', tactics: ['privilege-escalation'], desc: 'Exploit a software vulnerability to elevate privileges.' },
+
+  // Defense Evasion
+  { id: 'T1140', name: 'Deobfuscate/Decode Files or Information', tactics: ['defense-evasion'], desc: 'Use built-in or custom tooling to decode obfuscated payloads.' },
+  { id: 'T1562', name: 'Impair Defenses', tactics: ['defense-evasion'], desc: 'Disable or modify defensive tools to avoid possible detection.',
+    sub: [
+      { id: 'T1562.001', name: 'Disable or Modify Tools', desc: 'Tampering with EDR or antivirus.' },
+      { id: 'T1562.002', name: 'Disable Windows Event Logging', desc: 'Tampering with Windows event logging service.' },
+      { id: 'T1562.004', name: 'Disable or Modify System Firewall', desc: 'Firewall rule tampering.' },
+    ]
+  },
+  { id: 'T1070', name: 'Indicator Removal', tactics: ['defense-evasion'], desc: 'Delete or modify generated artifacts to remove evidence of presence.',
+    sub: [
+      { id: 'T1070.001', name: 'Clear Windows Event Logs', desc: 'Clearing Windows event log channels.' },
+      { id: 'T1070.004', name: 'File Deletion', desc: 'Removing files created during operations.' },
+    ]
+  },
+  { id: 'T1036', name: 'Masquerading', tactics: ['defense-evasion'], desc: 'Manipulate features of artifacts to appear legitimate to users or defenders.' },
+  { id: 'T1027', name: 'Obfuscated Files or Information', tactics: ['defense-evasion'], desc: 'Obfuscate content of executable files or messages.' },
+  { id: 'T1055', name: 'Process Injection', tactics: ['defense-evasion','privilege-escalation'], desc: 'Inject code into another process to evade defenses and elevate privileges.' },
+  { id: 'T1218', name: 'System Binary Proxy Execution', tactics: ['defense-evasion'], desc: 'Bypass process and signature-based defenses by proxying execution through signed binaries.' },
+  { id: 'T1497', name: 'Virtualization/Sandbox Evasion', tactics: ['defense-evasion','discovery'], desc: 'Check environment for sandbox indicators and avoid execution.' },
+
+  // Credential Access
+  { id: 'T1110', name: 'Brute Force', tactics: ['credential-access'], desc: 'Systematically guess credentials.',
+    sub: [
+      { id: 'T1110.001', name: 'Password Guessing', desc: 'Sequential password guessing.' },
+      { id: 'T1110.003', name: 'Password Spraying', desc: 'Common passwords across many accounts.' },
+      { id: 'T1110.004', name: 'Credential Stuffing', desc: 'Replay of breached credential pairs.' },
+    ]
+  },
+  { id: 'T1555', name: 'Credentials from Password Stores', tactics: ['credential-access'], desc: 'Search for credentials in password stores (browser, KeePass, keychain).' },
+  { id: 'T1056', name: 'Input Capture', tactics: ['credential-access','collection'], desc: 'Keylogging or other input capture for credential theft.' },
+  { id: 'T1003', name: 'OS Credential Dumping', tactics: ['credential-access'], desc: 'Dump credentials from the OS or applications.',
+    sub: [
+      { id: 'T1003.001', name: 'LSASS Memory', desc: 'Dumping LSASS process memory.' },
+      { id: 'T1003.002', name: 'Security Account Manager', desc: 'Accessing SAM database.' },
+      { id: 'T1003.003', name: 'NTDS', desc: 'Domain controller NTDS.dit extraction.' },
+      { id: 'T1003.008', name: '/etc/passwd and /etc/shadow', desc: 'Linux credential file access.' },
+    ]
+  },
+  { id: 'T1558', name: 'Steal or Forge Kerberos Tickets', tactics: ['credential-access'], desc: 'Kerberos abuse: golden tickets, silver tickets, kerberoasting.',
+    sub: [
+      { id: 'T1558.003', name: 'Kerberoasting', desc: 'Requesting service tickets for offline cracking.' },
+      { id: 'T1558.001', name: 'Golden Ticket', desc: 'Forged TGT signed with krbtgt hash.' },
+    ]
+  },
+  { id: 'T1552', name: 'Unsecured Credentials', tactics: ['credential-access'], desc: 'Credentials stored insecurely on disk, in config files, or in source code.' },
+
+  // Discovery
+  { id: 'T1087', name: 'Account Discovery', tactics: ['discovery'], desc: 'Get a listing of accounts on a system or within an environment.' },
+  { id: 'T1083', name: 'File and Directory Discovery', tactics: ['discovery'], desc: 'Enumerate files and directories.' },
+  { id: 'T1046', name: 'Network Service Discovery', tactics: ['discovery'], desc: 'Port scans and service enumeration.' },
+  { id: 'T1057', name: 'Process Discovery', tactics: ['discovery'], desc: 'List running processes on a system.' },
+  { id: 'T1018', name: 'Remote System Discovery', tactics: ['discovery'], desc: 'Find other systems on the network by IP, hostname, etc.' },
+  { id: 'T1082', name: 'System Information Discovery', tactics: ['discovery'], desc: 'Get details about the OS, hardware, etc.' },
+  { id: 'T1016', name: 'System Network Configuration Discovery', tactics: ['discovery'], desc: 'Network configuration enumeration (ipconfig, ifconfig).' },
+  { id: 'T1033', name: 'System Owner/User Discovery', tactics: ['discovery'], desc: 'Identify the primary user or logged-in users.' },
+
+  // Lateral Movement
+  { id: 'T1210', name: 'Exploitation of Remote Services', tactics: ['lateral-movement'], desc: 'Exploit remote system vulnerabilities to move laterally.' },
+  { id: 'T1570', name: 'Lateral Tool Transfer', tactics: ['lateral-movement'], desc: 'Transfer tools or files between systems in compromised environment.' },
+  { id: 'T1021', name: 'Remote Services', tactics: ['lateral-movement'], desc: 'Log into remote services to move laterally.',
+    sub: [
+      { id: 'T1021.001', name: 'Remote Desktop Protocol', desc: 'RDP-based lateral movement.' },
+      { id: 'T1021.002', name: 'SMB/Windows Admin Shares', desc: 'SMB shares for lateral movement.' },
+      { id: 'T1021.004', name: 'SSH', desc: 'SSH-based lateral movement.' },
+      { id: 'T1021.006', name: 'Windows Remote Management', desc: 'WinRM-based lateral movement.' },
+    ]
+  },
+  { id: 'T1550', name: 'Use Alternate Authentication Material', tactics: ['lateral-movement','defense-evasion'], desc: 'Pass-the-hash, pass-the-ticket, application access tokens.' },
+
+  // Collection
+  { id: 'T1560', name: 'Archive Collected Data', tactics: ['collection'], desc: 'Archive data prior to exfiltration to compress and encrypt.' },
+  { id: 'T1119', name: 'Automated Collection', tactics: ['collection'], desc: 'Automated processes to collect internal data.' },
+  { id: 'T1005', name: 'Data from Local System', tactics: ['collection'], desc: 'Search local system sources to find files of interest.' },
+  { id: 'T1039', name: 'Data from Network Shared Drive', tactics: ['collection'], desc: 'Search network shares for data.' },
+  { id: 'T1113', name: 'Screen Capture', tactics: ['collection'], desc: 'Capture display of user activity.' },
+
+  // Command and Control
+  { id: 'T1071', name: 'Application Layer Protocol', tactics: ['command-and-control'], desc: 'Use of OSI app-layer protocols (HTTP, DNS) for C2.',
+    sub: [
+      { id: 'T1071.001', name: 'Web Protocols', desc: 'HTTP/HTTPS C2 channels.' },
+      { id: 'T1071.004', name: 'DNS', desc: 'DNS-based C2.' },
+    ]
+  },
+  { id: 'T1132', name: 'Data Encoding', tactics: ['command-and-control'], desc: 'Encode C2 traffic to obscure content.' },
+  { id: 'T1573', name: 'Encrypted Channel', tactics: ['command-and-control'], desc: 'Cryptographic protocols for C2 communications.' },
+  { id: 'T1105', name: 'Ingress Tool Transfer', tactics: ['command-and-control'], desc: 'Transfer of tools/files from external system to compromised host.' },
+  { id: 'T1090', name: 'Proxy', tactics: ['command-and-control'], desc: 'Use of proxies to direct C2 traffic.' },
+  { id: 'T1219', name: 'Remote Access Software', tactics: ['command-and-control'], desc: 'Use legitimate remote-access tools (AnyDesk, TeamViewer) for C2.' },
+  { id: 'T1102', name: 'Web Service', tactics: ['command-and-control'], desc: 'Use legitimate web services (Pastebin, GitHub) for C2.' },
+
+  // Exfiltration
+  { id: 'T1020', name: 'Automated Exfiltration', tactics: ['exfiltration'], desc: 'Automated exfiltration of files or other data.' },
+  { id: 'T1030', name: 'Data Transfer Size Limits', tactics: ['exfiltration'], desc: 'Exfiltrate in fixed-size chunks to evade thresholds.' },
+  { id: 'T1048', name: 'Exfiltration Over Alternative Protocol', tactics: ['exfiltration'], desc: 'Exfiltrate over different protocol than C2.' },
+  { id: 'T1041', name: 'Exfiltration Over C2 Channel', tactics: ['exfiltration'], desc: 'Steal data over C2 channel to blend in.' },
+  { id: 'T1567', name: 'Exfiltration Over Web Service', tactics: ['exfiltration'], desc: 'Use legitimate cloud storage / web service for exfil.' },
+
+  // Impact
+  { id: 'T1485', name: 'Data Destruction', tactics: ['impact'], desc: 'Destroy data to interrupt system / network availability.' },
+  { id: 'T1486', name: 'Data Encrypted for Impact', tactics: ['impact'], desc: 'Ransomware — encrypt data to interrupt availability.' },
+  { id: 'T1499', name: 'Endpoint Denial of Service', tactics: ['impact'], desc: 'DoS attacks against endpoints.' },
+  { id: 'T1498', name: 'Network Denial of Service', tactics: ['impact'], desc: 'DoS attacks against network resources.' },
+  { id: 'T1490', name: 'Inhibit System Recovery', tactics: ['impact'], desc: 'Delete shadow copies, backups, recovery features.' },
+  { id: 'T1489', name: 'Service Stop', tactics: ['impact'], desc: 'Stop or disable services on a system.' },
+];
+
+
+/* ============================================================================
+   2. STATE MANAGEMENT
+   ============================================================================ */
+
+const STORAGE_KEY = 'sentinel.coverage.v1';
+const VIEW_KEY = 'sentinel.view.v1';
+
+// Owners / teams sample pool for mock dataset
+const SAMPLE_OWNERS = ['blue-team-alpha', 'detection-eng', 'soc-tier3', 'purple-ops', 'threat-research', 'incident-resp'];
+const SAMPLE_RULES = [
+  ['XSIAM-CR-104', 'SIGMA-PROC-001'], ['XSIAM-BIOC-027'], ['XSIAM-CR-219', 'XDR-AN-552', 'SIGMA-AUTH-014'],
+  ['XSIAM-CR-088'], ['XSIAM-AN-301', 'XSIAM-BIOC-198'], ['SIGMA-NET-072'], []
+];
+const SAMPLE_SOURCES = [
+  ['EDR', 'Sysmon'], ['Auth logs', 'Azure AD'], ['Network telemetry', 'NDR'], ['Cloud audit', 'CloudTrail'],
+  ['Email gateway'], ['Process telemetry', 'EDR']
+];
+
+/**
+ * App state. Coverage is keyed by T-code (including sub-techniques as separate entries).
+ */
+const state = {
+  coverage: {},       // T-code -> coverage record
+  filters: {
+    statuses: new Set(),   // empty = show all
+    search: '',
+  },
+  currentView: 'dashboard',
+  selectedTechnique: null,
+};
+
+/**
+ * Default coverage record shape.
+ */
+function defaultCoverage(tcode, name) {
+  return {
+    tcode: tcode,
+    name: name,
+    status: 'none',
+    notes: '',
+    logic: '',
+    rules: '',
+    sources: '',
+    owner: '',
+    reviewed: '',
+    signals: {
+      fidelity:    0,  // 0–100  detection fidelity
+      reliability: 0,  // alert reliability
+      telemetry:   0,  // telemetry quality
+      dataSources: 0,  // data source availability
+      depth:       0,  // detection depth
+      prevention:  0,  // prevention vs detect
+      testing:     0,  // validation status
+      frequency:   0,  // observed detection frequency
+    },
+  };
+}
+
+
+/* ============================================================================
+   3. STORAGE
+   ============================================================================ */
+
+function save() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.coverage));
+    const ts = new Date().toLocaleTimeString();
+    const el = document.getElementById('lastSaved');
+    if (el) el.textContent = 'saved · ' + ts;
+  } catch (err) {
+    toast('Storage error', err.message, 'error');
+  }
+}
+
+function load() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build a flat list of every T-code (technique + sub-technique) with parent links.
+ */
+function flatTechniques() {
+  const out = [];
+  for (const t of TECHNIQUES) {
+    out.push({ ...t, isSub: false });
+    if (t.sub) {
+      for (const s of t.sub) {
+        out.push({ ...s, tactics: t.tactics, isSub: true, parent: t.id });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Seed initial coverage records for all known techniques.
+ */
+function seedCoverage() {
+  for (const t of flatTechniques()) {
+    if (!state.coverage[t.id]) {
+      state.coverage[t.id] = defaultCoverage(t.id, t.name);
+    } else {
+      // ensure name kept in sync if dataset updated
+      state.coverage[t.id].name = t.name;
+    }
+  }
+}
+
+/**
+ * Mock dataset — populates roughly half the matrix with realistic-looking coverage
+ * so the UI has something compelling on first run.
+ */
+function loadSampleDataset() {
+  const flats = flatTechniques();
+  const statuses = ['full', 'partial', 'minimal', 'none', 'planned', 'fp', 'none', 'none', 'partial', 'minimal'];
+  for (let i = 0; i < flats.length; i++) {
+    const t = flats[i];
+    // skew distribution to be realistic — most things are partial/none
+    const r = Math.random();
+    let status;
+    if (r < 0.18) status = 'full';
+    else if (r < 0.42) status = 'partial';
+    else if (r < 0.55) status = 'minimal';
+    else if (r < 0.62) status = 'planned';
+    else if (r < 0.66) status = 'fp';
+    else status = 'none';
+
+    const rec = state.coverage[t.id] || defaultCoverage(t.id, t.name);
+    rec.status = status;
+    rec.owner = SAMPLE_OWNERS[i % SAMPLE_OWNERS.length];
+    rec.rules = (SAMPLE_RULES[i % SAMPLE_RULES.length] || []).join(', ');
+    rec.sources = (SAMPLE_SOURCES[i % SAMPLE_SOURCES.length] || []).join(', ');
+    rec.reviewed = randomRecentDate();
+
+    // Realistic signal scoring based on status
+    const baseline = {
+      full:    [85, 80, 90, 85, 80, 60, 85, 75],
+      partial: [65, 55, 70, 60, 50, 30, 55, 50],
+      minimal: [35, 30, 45, 40, 25, 15, 30, 25],
+      planned: [15, 10, 20, 15, 10, 10, 5, 5],
+      fp:      [50, 25, 70, 60, 50, 20, 40, 70],
+      none:    [0, 0, 10, 10, 0, 0, 0, 0],
+    }[status];
+
+    const keys = ['fidelity','reliability','telemetry','dataSources','depth','prevention','testing','frequency'];
+    keys.forEach((k, idx) => {
+      const variance = (Math.random() - 0.5) * 20;
+      rec.signals[k] = Math.max(0, Math.min(100, Math.round(baseline[idx] + variance)));
+    });
+
+    if (status === 'full' || status === 'partial') {
+      rec.logic = `// example detection logic for ${t.id}\ndataset=xdr_data\n| filter event_type = ENUM.PROCESS\n| filter action_process_image_name in ("powershell.exe","pwsh.exe")\n| filter action_process_image_command_line contains "-enc"`;
+    }
+
+    state.coverage[t.id] = rec;
+  }
+}
+
+function randomRecentDate() {
+  const days = Math.floor(Math.random() * 60);
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toISOString().split('T')[0];
+}
+
+
+/* ============================================================================
+   4. SCORING ENGINE
+   ============================================================================
+   Coverage % is a weighted sum of 8 detection signals.
+   Weights reflect what detection engineers actually care about: fidelity and
+   reliability matter most (a noisy alert that fires constantly is worse than
+   nothing); telemetry and data sources are foundational; testing validates
+   reality vs assumption.
+   ============================================================================ */
+
+const SIGNAL_WEIGHTS = {
+  fidelity:    0.20,
+  reliability: 0.18,
+  telemetry:   0.15,
+  dataSources: 0.12,
+  depth:       0.10,
+  testing:     0.10,
+  frequency:   0.08,
+  prevention:  0.07,
+};
+
+const SIGNAL_LABELS = {
+  fidelity:    'Detection Fidelity',
+  reliability: 'Alert Reliability',
+  telemetry:   'Telemetry Quality',
+  dataSources: 'Data Source Availability',
+  depth:       'Detection Depth',
+  prevention:  'Prevention Capability',
+  testing:     'Testing & Validation',
+  frequency:   'Detection Frequency',
+};
+
+function computeCoverage(record) {
+  if (!record || !record.signals) return 0;
+  let total = 0;
+  for (const [k, w] of Object.entries(SIGNAL_WEIGHTS)) {
+    total += (record.signals[k] || 0) * w;
+  }
+  // Status-based modifier — explicit "none" caps the score
+  if (record.status === 'none') total = Math.min(total, 5);
+  return Math.round(total);
+}
+
+function statusFromScore(score) {
+  if (score >= 80) return 'full';
+  if (score >= 55) return 'partial';
+  if (score >= 25) return 'minimal';
+  if (score >= 10) return 'planned';
+  return 'none';
+}
+
+
+/* ============================================================================
+   5. RENDER LAYER
+   ============================================================================ */
+
+const STATUS_META = {
+  full:    { label: 'Fully Covered',    color: 'var(--status-full)',    short: 'Full' },
+  partial: { label: 'Partially Covered', color: 'var(--status-partial)', short: 'Partial' },
+  minimal: { label: 'Minimal Coverage',  color: 'var(--status-minimal)', short: 'Minimal' },
+  none:    { label: 'No Coverage',       color: 'var(--status-none)',    short: 'None' },
+  fp:      { label: 'FP-Prone',          color: 'var(--status-fp)',      short: 'FP-Prone' },
+  planned: { label: 'Planned',           color: 'var(--status-planned)', short: 'Planned' },
+};
+
+function renderAll() {
+  renderStatusFilters();
+  renderMatrix();
+  renderDashboard();
+  renderAnalytics();
+  updateTopnavCount();
+}
+
+function updateTopnavCount() {
+  const count = flatTechniques().length;
+  document.getElementById('totalCount').textContent = count + ' techniques';
+  document.getElementById('matrixBadge').textContent = count;
+}
+
+/* --- Sidebar status filters --- */
+function renderStatusFilters() {
+  const el = document.getElementById('statusFilters');
+  el.innerHTML = '';
+  for (const [key, meta] of Object.entries(STATUS_META)) {
+    const count = Object.values(state.coverage).filter(c => c.status === key).length;
+    const active = state.filters.statuses.has(key);
+    const div = document.createElement('div');
+    div.className = 'nav-item';
+    if (active) div.style.background = 'var(--bg-elevated)';
+    div.innerHTML = `
+      <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${meta.color}"></span>
+      <span>${meta.short}</span>
+      <span class="nav-item-badge">${count}</span>
+    `;
+    div.addEventListener('click', () => {
+      if (state.filters.statuses.has(key)) state.filters.statuses.delete(key);
+      else state.filters.statuses.add(key);
+      renderStatusFilters();
+      renderMatrix();
+    });
+    el.appendChild(div);
+  }
+}
+
+/* --- Matrix view --- */
+function renderMatrix() {
+  const matrix = document.getElementById('matrix');
+  matrix.innerHTML = '';
+  const search = state.filters.search.toLowerCase();
+  const statusFilter = state.filters.statuses;
+
+  for (const tactic of TACTICS) {
+    const col = document.createElement('div');
+    col.className = 'tactic-col';
+
+    const techs = TECHNIQUES.filter(t => t.tactics.includes(tactic.id));
+    const visible = techs.filter(t => {
+      const rec = state.coverage[t.id];
+      if (search) {
+        const m = t.id.toLowerCase().includes(search) || t.name.toLowerCase().includes(search) ||
+                  (rec.owner||'').toLowerCase().includes(search) || (rec.rules||'').toLowerCase().includes(search);
+        if (!m) return false;
+      }
+      if (statusFilter.size > 0) {
+        return statusFilter.has(rec.status);
+      }
+      return true;
+    });
+
+    col.innerHTML = `
+      <div class="tactic-header">
+        <div class="tactic-name">${tactic.name}</div>
+        <div class="tactic-meta">
+          <span>${tactic.code}</span>
+          <span>${visible.length}/${techs.length}</span>
+        </div>
+      </div>
+      <div class="technique-list" id="tl-${tactic.id}"></div>
+    `;
+    matrix.appendChild(col);
+
+    const list = col.querySelector('.technique-list');
+    for (const t of visible) {
+      list.appendChild(makeTechniqueCard(t));
+    }
+
+    if (visible.length === 0) {
+      list.innerHTML = '<div style="font-size:11px;color:var(--text-faint);padding:8px;text-align:center;font-family:var(--font-mono)">— no matches</div>';
+    }
+  }
+}
+
+function makeTechniqueCard(t) {
+  const rec = state.coverage[t.id];
+  const card = document.createElement('div');
+  card.className = 'technique-card';
+  card.dataset.status = rec.status;
+  card.dataset.tcode = t.id;
+
+  const subCount = (t.sub || []).length;
+  card.innerHTML = `
+    ${subCount ? `<span class="sub-indicator">+${subCount}</span>` : ''}
+    <div class="tcode">${t.id}</div>
+    <div class="tname">${t.name}</div>
+    ${subCount ? `<div class="subtechnique-list"></div>` : ''}
+  `;
+
+  card.addEventListener('click', e => {
+    e.stopPropagation();
+    openDetail(t.id);
+  });
+
+  if (subCount) {
+    card.addEventListener('dblclick', e => {
+      e.stopPropagation();
+      card.classList.toggle('expanded');
+      const list = card.querySelector('.subtechnique-list');
+      if (card.classList.contains('expanded') && !list.children.length) {
+        for (const s of t.sub) {
+          const subRec = state.coverage[s.id];
+          const sub = document.createElement('div');
+          sub.className = 'subtechnique-card';
+          sub.dataset.status = subRec.status;
+          sub.innerHTML = `<span class="tcode">${s.id}</span><span class="tname">${s.name}</span>`;
+          sub.addEventListener('click', ev => {
+            ev.stopPropagation();
+            openDetail(s.id);
+          });
+          list.appendChild(sub);
+        }
+      }
+    });
+  }
+
+  // Tooltip
+  card.addEventListener('mouseenter', e => showTooltip(t, e));
+  card.addEventListener('mouseleave', hideTooltip);
+  card.addEventListener('mousemove', e => moveTooltip(e));
+
+  return card;
+}
+
+/* --- Tooltip --- */
+const tooltipEl = document.getElementById('tooltip');
+function showTooltip(t, e) {
+  const rec = state.coverage[t.id];
+  const score = computeCoverage(rec);
+  tooltipEl.innerHTML = `
+    <div class="name">${t.id} · ${t.name}</div>
+    <div class="desc">${t.desc || ''}</div>
+    <div style="margin-top:6px;font-family:var(--font-mono);font-size:10px;color:var(--text-muted)">
+      ${STATUS_META[rec.status].label.toUpperCase()} · score ${score}% · ${rec.owner || 'unassigned'}
+    </div>
+  `;
+  tooltipEl.classList.add('show');
+  moveTooltip(e);
+}
+function moveTooltip(e) {
+  const rect = tooltipEl.getBoundingClientRect();
+  let x = e.clientX + 14;
+  let y = e.clientY + 14;
+  if (x + rect.width > window.innerWidth) x = e.clientX - rect.width - 14;
+  if (y + rect.height > window.innerHeight) y = e.clientY - rect.height - 14;
+  tooltipEl.style.left = x + 'px';
+  tooltipEl.style.top  = y + 'px';
+}
+function hideTooltip() { tooltipEl.classList.remove('show'); }
+
+
+/* --- Dashboard --- */
+function renderDashboard() {
+  const recs = Object.values(state.coverage);
+  const total = recs.length;
+  const counts = {};
+  for (const k of Object.keys(STATUS_META)) counts[k] = 0;
+  for (const r of recs) counts[r.status] = (counts[r.status] || 0) + 1;
+
+  const covered = counts.full + counts.partial + counts.minimal;
+  const coveragePct = total ? Math.round((counts.full + counts.partial * 0.6 + counts.minimal * 0.3) / total * 100) : 0;
+  const fullPct = total ? Math.round(counts.full / total * 100) : 0;
+  const avgScore = recs.length ? Math.round(recs.reduce((s, r) => s + computeCoverage(r), 0) / recs.length) : 0;
+
+  // Stat cards
+  document.getElementById('statGrid').innerHTML = `
+    <div class="stat-card">
+      <div class="stat-label">Weighted Coverage</div>
+      <div class="stat-value">${coveragePct}<span style="font-size:18px;color:var(--text-muted)">%</span></div>
+      <div class="stat-delta up">▲ 3.4% vs last week</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Fully Covered</div>
+      <div class="stat-value-mono accent">${counts.full}<span style="font-size:14px;color:var(--text-muted);margin-left:6px">/ ${total}</span></div>
+      <div class="stat-delta up">${fullPct}% of matrix</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">No Coverage</div>
+      <div class="stat-value-mono" style="color:var(--status-none)">${counts.none}</div>
+      <div class="stat-delta down">${total ? Math.round(counts.none/total*100) : 0}% blind spots</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Mean Score</div>
+      <div class="stat-value-mono">${avgScore}</div>
+      <div class="stat-delta flat">across 8 signals</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Planned / WIP</div>
+      <div class="stat-value-mono" style="color:var(--status-planned)">${counts.planned}</div>
+      <div class="stat-delta flat">in detection backlog</div>
+    </div>
+  `;
+
+  // Subtitle
+  const reviewed = recs.filter(r => r.reviewed).length;
+  document.getElementById('dashSubtitle').textContent =
+    `${total} TTPs tracked · ${counts.full} fully covered · ${reviewed} reviewed this cycle`;
+
+  // Tactic bars
+  renderTacticBars();
+
+  // Gauge
+  renderGauge(coveragePct, counts);
+
+  // Top risks
+  renderRiskList();
+
+  // Donut
+  renderDonut(counts, total);
+}
+
+function renderTacticBars() {
+  const wrap = document.getElementById('tacticBars');
+  wrap.innerHTML = '';
+  for (const tactic of TACTICS) {
+    const techs = TECHNIQUES.filter(t => t.tactics.includes(tactic.id));
+    const total = techs.length;
+    let weighted = 0;
+    for (const t of techs) {
+      const rec = state.coverage[t.id];
+      if (!rec) continue;
+      const score = computeCoverage(rec) / 100;
+      weighted += score;
+    }
+    const pct = total ? Math.round(weighted / total * 100) : 0;
+    const color = pct >= 70 ? 'var(--status-full)' : pct >= 40 ? 'var(--status-partial)' : pct >= 20 ? 'var(--status-minimal)' : 'var(--status-none)';
+
+    const row = document.createElement('div');
+    row.className = 'tactic-bar-row';
+    row.innerHTML = `
+      <div class="name">${tactic.name}</div>
+      <div class="tactic-bar-track"><div class="tactic-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      <div class="pct">${pct}%</div>
+    `;
+    wrap.appendChild(row);
+  }
+}
+
+function renderGauge(pct, counts) {
+  const wrap = document.getElementById('gaugeWrap');
+  // SVG ring gauge
+  const r = 56;
+  const c = 2 * Math.PI * r;
+  const filled = c * (pct / 100);
+  wrap.innerHTML = `
+    <svg class="gauge-svg" width="140" height="140" viewBox="0 0 140 140">
+      <circle cx="70" cy="70" r="${r}" fill="none" stroke="var(--bg-elevated)" stroke-width="10"/>
+      <circle cx="70" cy="70" r="${r}" fill="none" stroke="var(--accent)" stroke-width="10"
+              stroke-dasharray="${filled} ${c - filled}" stroke-dashoffset="${c / 4}" stroke-linecap="round"
+              transform="rotate(-90 70 70)" style="transition:stroke-dasharray 800ms ease"/>
+      <text x="70" y="74" text-anchor="middle" font-family="IBM Plex Serif" font-size="28" font-weight="500" fill="var(--text-primary)">${pct}%</text>
+      <text x="70" y="92" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="var(--text-muted)" letter-spacing="0.1em">COVERAGE</text>
+    </svg>
+    <div class="gauge-meta">
+      <div class="gauge-row" style="border-left-color:var(--status-full)">
+        <span class="label"><span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:var(--status-full)"></span>Fully Covered</span>
+        <span class="value">${counts.full}</span>
+      </div>
+      <div class="gauge-row" style="border-left-color:var(--status-partial)">
+        <span class="label"><span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:var(--status-partial)"></span>Partial</span>
+        <span class="value">${counts.partial}</span>
+      </div>
+      <div class="gauge-row" style="border-left-color:var(--status-none)">
+        <span class="label"><span style="display:inline-block;width:6px;height:6px;border-radius:1px;background:var(--status-none)"></span>Uncovered</span>
+        <span class="value">${counts.none}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderRiskList() {
+  const wrap = document.getElementById('riskList');
+  // Risk = uncovered/minimal techniques weighted by tactic priority
+  const tacticWeight = {
+    'initial-access': 5, 'execution': 5, 'persistence': 4, 'credential-access': 5,
+    'lateral-movement': 4, 'impact': 5, 'privilege-escalation': 4, 'command-and-control': 4,
+    'defense-evasion': 3, 'collection': 2, 'exfiltration': 3, 'discovery': 2,
+    'reconnaissance': 1, 'resource-development': 1,
+  };
+  const all = flatTechniques()
+    .filter(t => !t.isSub) // top-level only for the dashboard
+    .map(t => {
+      const rec = state.coverage[t.id];
+      const score = computeCoverage(rec);
+      const weight = Math.max(...t.tactics.map(tac => tacticWeight[tac] || 1));
+      const risk = (100 - score) * weight / 100;
+      return { t, rec, score, risk };
+    })
+    .filter(x => x.score < 40)
+    .sort((a, b) => b.risk - a.risk)
+    .slice(0, 8);
+
+  wrap.innerHTML = '';
+  if (all.length === 0) {
+    wrap.innerHTML = '<div class="empty">All techniques have moderate or better coverage. 🎯</div>';
+    return;
+  }
+  for (const r of all) {
+    const sev = r.risk > 4 ? 'critical' : r.risk > 2.5 ? 'high' : 'medium';
+    const div = document.createElement('div');
+    div.className = 'risk-item';
+    div.innerHTML = `
+      <span class="tcode">${r.t.id}</span>
+      <span class="name">${r.t.name}</span>
+      <span class="severity ${sev}">${sev.toUpperCase()}</span>
+    `;
+    div.addEventListener('click', () => { switchView('matrix'); setTimeout(() => openDetail(r.t.id), 250); });
+    wrap.appendChild(div);
+  }
+}
+
+function renderDonut(counts, total) {
+  const wrap = document.getElementById('donutWrap');
+  const order = ['full','partial','minimal','planned','fp','none'];
+  const cx = 60, cy = 60, r = 42, sw = 16;
+  const c = 2 * Math.PI * r;
+
+  let offset = 0;
+  const segments = order.map(k => {
+    const v = counts[k] || 0;
+    const len = total ? (v / total) * c : 0;
+    const seg = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${STATUS_META[k].color}" stroke-width="${sw}" stroke-dasharray="${len} ${c}" stroke-dashoffset="${-offset}" transform="rotate(-90 ${cx} ${cy})"/>`;
+    offset += len;
+    return seg;
+  }).join('');
+
+  wrap.innerHTML = `
+    <svg width="120" height="120" viewBox="0 0 120 120">
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--bg-elevated)" stroke-width="${sw}"/>
+      ${segments}
+      <text x="${cx}" y="${cy+4}" text-anchor="middle" font-family="IBM Plex Mono" font-size="14" font-weight="500" fill="var(--text-primary)">${total}</text>
+    </svg>
+    <div class="donut-legend">
+      ${order.map(k => `
+        <div class="legend-row">
+          <span class="legend-swatch" style="background:${STATUS_META[k].color}"></span>
+          <span class="label">${STATUS_META[k].label}</span>
+          <span class="value">${counts[k] || 0}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+/* --- Analytics --- */
+function renderAnalytics() {
+  renderMaturityChart();
+  renderScatterChart();
+  renderHeatmap();
+}
+
+function renderMaturityChart() {
+  const wrap = document.getElementById('maturityChart');
+  // Bucket scores 0-20, 21-40, 41-60, 61-80, 81-100
+  const buckets = [0, 0, 0, 0, 0];
+  const labels  = ['0–20', '21–40', '41–60', '61–80', '81–100'];
+  for (const r of Object.values(state.coverage)) {
+    const s = computeCoverage(r);
+    if (s <= 20) buckets[0]++;
+    else if (s <= 40) buckets[1]++;
+    else if (s <= 60) buckets[2]++;
+    else if (s <= 80) buckets[3]++;
+    else buckets[4]++;
+  }
+  const max = Math.max(...buckets, 1);
+  const W = 280, H = 160, pad = 24;
+  const bw = (W - pad * 2) / buckets.length;
+  let bars = '';
+  buckets.forEach((v, i) => {
+    const h = (v / max) * (H - pad * 2);
+    const x = pad + i * bw;
+    const y = H - pad - h;
+    const color = i === 0 ? 'var(--status-none)' : i === 1 ? 'var(--status-minimal)' : i === 2 ? 'var(--status-partial)' : i === 3 ? 'var(--status-partial)' : 'var(--status-full)';
+    bars += `
+      <rect x="${x + 4}" y="${y}" width="${bw - 8}" height="${h}" fill="${color}" rx="2"/>
+      <text x="${x + bw / 2}" y="${y - 4}" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="var(--text-secondary)">${v}</text>
+      <text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle" font-family="IBM Plex Mono" font-size="10" fill="var(--text-muted)">${labels[i]}</text>
+    `;
+  });
+  wrap.innerHTML = `<svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}">${bars}</svg>`;
+}
+
+function renderScatterChart() {
+  const wrap = document.getElementById('scatterChart');
+  const W = 280, H = 200, pad = 28;
+  const pts = Object.values(state.coverage).map(r => {
+    const conf = (r.signals.reliability + r.signals.fidelity) / 2;
+    const mat = (r.signals.testing + r.signals.depth) / 2;
+    return { conf, mat, status: r.status };
+  });
+
+  const axes = `
+    <line x1="${pad}" y1="${H - pad}" x2="${W - pad}" y2="${H - pad}" stroke="var(--border)" stroke-width="1"/>
+    <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${H - pad}" stroke="var(--border)" stroke-width="1"/>
+    <text x="${W / 2}" y="${H - 6}" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="var(--text-muted)">MATURITY →</text>
+    <text x="10" y="${H / 2}" text-anchor="middle" font-family="IBM Plex Mono" font-size="9" fill="var(--text-muted)" transform="rotate(-90 10 ${H/2})">CONFIDENCE →</text>
+  `;
+  const dots = pts.map(p => {
+    const x = pad + (p.mat / 100) * (W - pad * 2);
+    const y = H - pad - (p.conf / 100) * (H - pad * 2);
+    return `<circle cx="${x}" cy="${y}" r="2.5" fill="${STATUS_META[p.status].color}" opacity="0.75"/>`;
+  }).join('');
+
+  wrap.innerHTML = `<svg width="100%" height="${H}" viewBox="0 0 ${W} ${H}">${axes}${dots}</svg>`;
+}
+
+function renderHeatmap() {
+  const grid = document.getElementById('heatmapGrid');
+  const buckets = ['0–20', '21–40', '41–60', '61–80', '81–100'];
+  // Header row
+  let html = `
+    <div class="heatmap-row" style="grid-template-columns:160px repeat(${buckets.length},1fr);font-size:9px;color:var(--text-muted);font-family:var(--font-mono)">
+      <span></span>${buckets.map(b => `<span style="text-align:center">${b}</span>`).join('')}
+    </div>
+  `;
+  for (const tactic of TACTICS) {
+    const techs = TECHNIQUES.filter(t => t.tactics.includes(tactic.id));
+    const counts = [0, 0, 0, 0, 0];
+    for (const t of techs) {
+      const s = computeCoverage(state.coverage[t.id]);
+      if (s <= 20) counts[0]++;
+      else if (s <= 40) counts[1]++;
+      else if (s <= 60) counts[2]++;
+      else if (s <= 80) counts[3]++;
+      else counts[4]++;
+    }
+    const max = Math.max(...counts, 1);
+    const cells = counts.map((v, i) => {
+      const intensity = v / max;
+      const color = i === 0 ? `rgba(239,68,68,${0.15 + intensity * 0.7})` :
+                    i === 1 ? `rgba(249,115,22,${0.15 + intensity * 0.7})` :
+                    i === 2 ? `rgba(234,179,8,${0.15 + intensity * 0.7})` :
+                    i === 3 ? `rgba(16,185,129,${0.15 + intensity * 0.7})` :
+                              `rgba(16,185,129,${0.25 + intensity * 0.7})`;
+      return `<div class="heatmap-cell" style="background:${v ? color : 'var(--bg-elevated)'};color:${v ? 'var(--text-primary)' : 'var(--text-faint)'}">${v || '·'}</div>`;
+    }).join('');
+    html += `
+      <div class="heatmap-row" style="grid-template-columns:160px repeat(${buckets.length},1fr)">
+        <span class="heatmap-label">${tactic.name}</span>
+        ${cells}
+      </div>
+    `;
+  }
+  grid.innerHTML = html;
+}
+
+
+/* ============================================================================
+   6. DETAIL PANEL
+   ============================================================================ */
+
+function openDetail(tcode) {
+  const t = flatTechniques().find(x => x.id === tcode);
+  if (!t) return;
+  const rec = state.coverage[tcode];
+  state.selectedTechnique = tcode;
+
+  document.getElementById('detailTCode').textContent = t.id;
+  document.getElementById('detailName').textContent = t.name;
+  document.getElementById('detailDesc').textContent = t.desc || '—';
+
+  const tacticsEl = document.getElementById('detailTactics');
+  tacticsEl.innerHTML = t.tactics.map(id => {
+    const tac = TACTICS.find(x => x.id === id);
+    return `<span class="panel-tactic">${tac ? tac.name : id}</span>`;
+  }).join('');
+
+  // Status grid
+  const sg = document.getElementById('statusGrid');
+  sg.innerHTML = '';
+  for (const [key, meta] of Object.entries(STATUS_META)) {
+    const pill = document.createElement('div');
+    pill.className = 'status-pill' + (rec.status === key ? ' selected' : '');
+    pill.style.color = meta.color;
+    pill.innerHTML = `<span class="dot" style="background:${meta.color}"></span><span style="color:var(--text-primary)">${meta.label}</span>`;
+    pill.addEventListener('click', () => {
+      rec.status = key;
+      openDetail(tcode);  // re-render
+    });
+    sg.appendChild(pill);
+  }
+
+  // Signal sliders
+  const sl = document.getElementById('signalSliders');
+  sl.innerHTML = '';
+  for (const [key, label] of Object.entries(SIGNAL_LABELS)) {
+    const row = document.createElement('div');
+    row.className = 'field';
+    const val = rec.signals[key] || 0;
+    row.innerHTML = `
+      <div class="score-row"><span style="color:var(--text-secondary);font-family:var(--font-sans);font-size:11px">${label}</span><span class="val">${val}</span></div>
+      <input class="score-slider" type="range" min="0" max="100" value="${val}" data-signal="${key}" />
+    `;
+    const slider = row.querySelector('input');
+    const valEl = row.querySelector('.val');
+    slider.addEventListener('input', e => {
+      const v = parseInt(e.target.value, 10);
+      rec.signals[key] = v;
+      valEl.textContent = v;
+      updateComputed(rec);
+    });
+    sl.appendChild(row);
+  }
+  updateComputed(rec);
+
+  // Fields
+  document.getElementById('fldOwner').value = rec.owner || '';
+  document.getElementById('fldReviewed').value = rec.reviewed || '';
+  document.getElementById('fldRules').value = rec.rules || '';
+  document.getElementById('fldSources').value = rec.sources || '';
+  document.getElementById('fldLogic').value = rec.logic || '';
+  document.getElementById('fldNotes').value = rec.notes || '';
+
+  document.getElementById('detailPanel').classList.add('open');
+}
+
+function updateComputed(rec) {
+  const score = computeCoverage(rec);
+  document.getElementById('computedScore').textContent = score + '%';
+  document.getElementById('computedFill').style.width = score + '%';
+}
+
+function closeDetail() {
+  document.getElementById('detailPanel').classList.remove('open');
+  state.selectedTechnique = null;
+}
+
+function saveDetail() {
+  const tcode = state.selectedTechnique;
+  if (!tcode) return;
+  const rec = state.coverage[tcode];
+
+  rec.owner = document.getElementById('fldOwner').value;
+  rec.reviewed = document.getElementById('fldReviewed').value;
+  rec.rules = document.getElementById('fldRules').value;
+  rec.sources = document.getElementById('fldSources').value;
+  rec.logic = document.getElementById('fldLogic').value;
+  rec.notes = document.getElementById('fldNotes').value;
+
+  save();
+  renderAll();
+  toast('Saved', `${tcode} coverage updated`, 'success');
+}
+
+function deleteDetail() {
+  const tcode = state.selectedTechnique;
+  if (!tcode) return;
+  // Don't actually remove the record — just reset it
+  state.coverage[tcode] = defaultCoverage(tcode, state.coverage[tcode].name);
+  save();
+  renderAll();
+  closeDetail();
+  toast('Reset', `${tcode} coverage cleared`, 'info');
+}
+
+
+/* ============================================================================
+   7. MODALS — Add technique, paste import
+   ============================================================================ */
+
+function showModal(title, bodyHTML, footerHTML) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = bodyHTML;
+  document.getElementById('modalFooter').innerHTML = footerHTML;
+  document.getElementById('modalBackdrop').classList.add('open');
+}
+
+function hideModal() {
+  document.getElementById('modalBackdrop').classList.remove('open');
+}
+
+function modalAddTechnique() {
+  const tacticOpts = TACTICS.map(t => `<option value="${t.id}">${t.name}</option>`).join('');
+  showModal('Add New Technique',
+    `
+    <div class="field"><span class="field-label">T-Code</span><input class="field-input" id="mTcode" placeholder="T1234 or T1234.001" /></div>
+    <div class="field"><span class="field-label">Name</span><input class="field-input" id="mName" placeholder="Technique name" /></div>
+    <div class="field"><span class="field-label">Tactic</span><select class="field-select" id="mTactic">${tacticOpts}</select></div>
+    <div class="field"><span class="field-label">Description</span><textarea class="field-textarea" id="mDesc" style="font-family:var(--font-sans);font-size:12px"></textarea></div>
+    `,
+    `
+    <button class="btn" id="mCancel">Cancel</button>
+    <button class="btn btn-primary" id="mSave">Add</button>
+    `
+  );
+  document.getElementById('mCancel').onclick = hideModal;
+  document.getElementById('mSave').onclick = () => {
+    const tcode = document.getElementById('mTcode').value.trim().toUpperCase();
+    const name = document.getElementById('mName').value.trim();
+    const tactic = document.getElementById('mTactic').value;
+    const desc = document.getElementById('mDesc').value.trim();
+    if (!tcode || !name) { toast('Missing fields', 'T-Code and Name required', 'error'); return; }
+    if (!/^T\d{4}(\.\d{3})?$/.test(tcode)) { toast('Invalid T-Code', 'Must be Tnnnn or Tnnnn.nnn', 'error'); return; }
+
+    // Add to TECHNIQUES dataset (in-memory)
+    if (tcode.includes('.')) {
+      const parent = tcode.split('.')[0];
+      const p = TECHNIQUES.find(x => x.id === parent);
+      if (!p) { toast('Parent not found', `Add ${parent} first`, 'error'); return; }
+      p.sub = p.sub || [];
+      p.sub.push({ id: tcode, name, desc });
+    } else {
+      TECHNIQUES.push({ id: tcode, name, tactics: [tactic], desc, sub: [] });
+    }
+    state.coverage[tcode] = defaultCoverage(tcode, name);
+    save();
+    renderAll();
+    hideModal();
+    toast('Technique added', `${tcode} ${name}`, 'success');
+  };
+}
+
+function modalPasteImport() {
+  showModal('Paste T-Codes for Bulk Import',
+    `
+    <p style="font-size:11.5px;color:var(--text-muted)">One T-code per line. Optional CSV format: <code>T-code, status, owner, rules</code>. Status values: full, partial, minimal, none, planned, fp.</p>
+    <textarea class="field-textarea" id="pasteArea" style="min-height:180px" placeholder="T1059.001
+T1078.002, partial, blue-team-alpha, XSIAM-CR-042
+T1003.001, full, detection-eng, XSIAM-CR-088, EDR"></textarea>
+    `,
+    `
+    <button class="btn" id="mCancel">Cancel</button>
+    <button class="btn btn-primary" id="mImport">Import</button>
+    `
+  );
+  document.getElementById('mCancel').onclick = hideModal;
+  document.getElementById('mImport').onclick = () => {
+    const lines = document.getElementById('pasteArea').value.trim().split('\n').filter(Boolean);
+    let added = 0, updated = 0;
+    for (const line of lines) {
+      const parts = line.split(',').map(p => p.trim());
+      const tcode = parts[0].toUpperCase();
+      if (!/^T\d{4}(\.\d{3})?$/.test(tcode)) continue;
+      if (!state.coverage[tcode]) {
+        state.coverage[tcode] = defaultCoverage(tcode, tcode);
+        added++;
+      } else updated++;
+      const rec = state.coverage[tcode];
+      if (parts[1] && STATUS_META[parts[1]]) rec.status = parts[1];
+      if (parts[2]) rec.owner = parts[2];
+      if (parts[3]) rec.rules = parts.slice(3).join(', ');
+    }
+    save();
+    renderAll();
+    hideModal();
+    toast('Import complete', `${added} new · ${updated} updated`, 'success');
+  };
+}
+
+
+/* ============================================================================
+   8. IMPORT / EXPORT
+   ============================================================================ */
+
+function exportJSON() {
+  const data = {
+    exportedAt: new Date().toISOString(),
+    attackVersion: '17',
+    coverage: state.coverage,
+  };
+  download('sentinel-coverage.json', JSON.stringify(data, null, 2), 'application/json');
+  toast('Exported', 'sentinel-coverage.json downloaded', 'success');
+}
+
+function exportCSV() {
+  const headers = ['tcode','name','status','owner','reviewed','rules','sources','score',
+                   ...Object.keys(SIGNAL_WEIGHTS), 'notes'];
+  const rows = [headers.join(',')];
+  for (const r of Object.values(state.coverage)) {
+    const score = computeCoverage(r);
+    const vals = [
+      r.tcode, q(r.name), r.status, q(r.owner||''), r.reviewed||'', q(r.rules||''), q(r.sources||''), score,
+      ...Object.keys(SIGNAL_WEIGHTS).map(k => r.signals[k] || 0),
+      q(r.notes||'')
+    ];
+    rows.push(vals.join(','));
+  }
+  download('sentinel-coverage.csv', rows.join('\n'), 'text/csv');
+  toast('Exported', 'sentinel-coverage.csv downloaded', 'success');
+}
+
+function q(s) {
+  if (s === null || s === undefined) return '';
+  s = String(s);
+  if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+    return '"' + s.replace(/"/g, '""') + '"';
+  }
+  return s;
+}
+
+function exportNavigatorLayer() {
+  const colorMap = {
+    full:    '#10b981',
+    partial: '#eab308',
+    minimal: '#f97316',
+    none:    '#ef4444',
+    fp:      '#a855f7',
+    planned: '#3b82f6',
+  };
+  const techniques = [];
+  for (const r of Object.values(state.coverage)) {
+    if (r.status === 'none' && !r.owner && !r.rules) continue; // skip empty
+    const score = computeCoverage(r);
+    techniques.push({
+      techniqueID: r.tcode,
+      score: score,
+      color: colorMap[r.status],
+      comment: `[${STATUS_META[r.status].label}] ${r.owner ? 'owner: ' + r.owner + ' · ' : ''}${r.rules ? 'rules: ' + r.rules : ''}`,
+      enabled: true,
+    });
+  }
+  const layer = {
+    name: 'SENTINEL Coverage Export',
+    versions: { attack: '17', navigator: '5.1.0', layer: '4.5' },
+    domain: 'enterprise-attack',
+    description: 'Detection coverage exported from SENTINEL on ' + new Date().toISOString(),
+    expandedSubtechniques: 'all',
+    techniques,
+    gradient: {
+      colors: ['#ef4444', '#f97316', '#eab308', '#10b981'],
+      minValue: 0,
+      maxValue: 100,
+    },
+    legendItems: Object.entries(STATUS_META).map(([k, v]) => ({ label: v.label, color: colorMap[k] })),
+  };
+  download('sentinel-navigator-layer.json', JSON.stringify(layer, null, 2), 'application/json');
+  toast('Layer exported', 'Upload to ATT&CK Navigator', 'success');
+}
+
+function download(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function handleFileImport(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const txt = e.target.result;
+    try {
+      if (file.name.endsWith('.json')) {
+        const data = JSON.parse(txt);
+        if (data.coverage) {
+          Object.assign(state.coverage, data.coverage);
+        } else if (data.techniques) {
+          // Navigator layer format
+          for (const t of data.techniques) {
+            const tc = t.techniqueID;
+            if (!state.coverage[tc]) state.coverage[tc] = defaultCoverage(tc, t.comment || tc);
+            if (t.color === '#10b981') state.coverage[tc].status = 'full';
+            else if (t.color === '#eab308') state.coverage[tc].status = 'partial';
+            else if (t.color === '#f97316') state.coverage[tc].status = 'minimal';
+            else if (t.color === '#3b82f6') state.coverage[tc].status = 'planned';
+            else if (t.color === '#a855f7') state.coverage[tc].status = 'fp';
+            if (t.comment) state.coverage[tc].notes = t.comment;
+          }
+        }
+      } else if (file.name.endsWith('.csv')) {
+        const lines = txt.split('\n').filter(Boolean);
+        const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+        const tIdx = headers.indexOf('tcode');
+        const sIdx = headers.indexOf('status');
+        for (let i = 1; i < lines.length; i++) {
+          const parts = parseCSVLine(lines[i]);
+          const tc = parts[tIdx];
+          if (!/^T\d{4}/.test(tc)) continue;
+          if (!state.coverage[tc]) state.coverage[tc] = defaultCoverage(tc, tc);
+          if (sIdx >= 0 && STATUS_META[parts[sIdx]]) state.coverage[tc].status = parts[sIdx];
+        }
+      }
+      save();
+      renderAll();
+      toast('Import complete', `Loaded from ${file.name}`, 'success');
+    } catch (err) {
+      toast('Import failed', err.message, 'error');
+    }
+  };
+  reader.readAsText(file);
+}
+
+function parseCSVLine(line) {
+  const out = [];
+  let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') inQ = false;
+      else cur += ch;
+    } else {
+      if (ch === '"') inQ = true;
+      else if (ch === ',') { out.push(cur); cur = ''; }
+      else cur += ch;
+    }
+  }
+  out.push(cur);
+  return out.map(s => s.trim());
+}
+
+
+/* ============================================================================
+   9. TOAST
+   ============================================================================ */
+
+function toast(title, desc, type = 'info') {
+  const stack = document.getElementById('toastStack');
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.innerHTML = `<div class="title">${title}</div><div class="desc">${desc}</div>`;
+  stack.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'opacity 200ms, transform 200ms';
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(12px)';
+    setTimeout(() => el.remove(), 220);
+  }, 3000);
+}
+
+
+/* ============================================================================
+   10. NAV / VIEW SWITCHING
+   ============================================================================ */
+
+function switchView(viewId) {
+  state.currentView = viewId;
+  document.querySelectorAll('.nav-item[data-view]').forEach(el => {
+    el.classList.toggle('active', el.dataset.view === viewId);
+  });
+  document.querySelectorAll('.view').forEach(el => {
+    el.classList.toggle('active', el.id === 'view-' + viewId);
+  });
+  if (viewId === 'dashboard') renderDashboard();
+  if (viewId === 'matrix') renderMatrix();
+  if (viewId === 'analytics') renderAnalytics();
+}
+
+
+/* ============================================================================
+   11. EVENT BINDING
+   ============================================================================ */
+
+document.addEventListener('DOMContentLoaded', () => {
+  // Nav
+  document.querySelectorAll('.nav-item[data-view]').forEach(el => {
+    el.addEventListener('click', () => switchView(el.dataset.view));
+  });
+
+  // Detail panel
+  document.getElementById('detailClose').addEventListener('click', closeDetail);
+  document.getElementById('btnDiscard').addEventListener('click', closeDetail);
+  document.getElementById('btnSaveTech').addEventListener('click', saveDetail);
+  document.getElementById('btnDeleteTech').addEventListener('click', deleteDetail);
+
+  // Top nav
+  document.getElementById('btnAddTechnique').addEventListener('click', modalAddTechnique);
+  document.getElementById('globalSearch').addEventListener('input', e => {
+    state.filters.search = e.target.value;
+    if (state.currentView !== 'matrix') switchView('matrix');
+    renderMatrix();
+  });
+
+  // Modal close
+  document.getElementById('modalClose').addEventListener('click', hideModal);
+  document.getElementById('modalBackdrop').addEventListener('click', e => {
+    if (e.target.id === 'modalBackdrop') hideModal();
+  });
+
+  // Matrix toolbar
+  document.getElementById('btnExpandAll').addEventListener('click', () => {
+    document.querySelectorAll('.technique-card').forEach(card => {
+      if (card.querySelector('.subtechnique-list')) {
+        if (!card.classList.contains('expanded')) {
+          card.dispatchEvent(new Event('dblclick'));
+        }
+      }
+    });
+  });
+  document.getElementById('btnCollapseAll').addEventListener('click', () => {
+    document.querySelectorAll('.technique-card.expanded').forEach(c => c.classList.remove('expanded'));
+  });
+
+  // I/O
+  document.getElementById('btnExportJSON').addEventListener('click', exportJSON);
+  document.getElementById('btnExportCSV').addEventListener('click', exportCSV);
+  document.getElementById('btnExportNav').addEventListener('click', exportNavigatorLayer);
+  document.getElementById('btnPasteImport').addEventListener('click', modalPasteImport);
+  document.getElementById('btnLoadSample').addEventListener('click', () => {
+    loadSampleDataset();
+    save();
+    renderAll();
+    toast('Sample loaded', 'Mock coverage applied to all techniques', 'success');
+  });
+  document.getElementById('btnReset').addEventListener('click', () => {
+    if (!confirm('Clear all coverage data? This cannot be undone.')) return;
+    localStorage.removeItem(STORAGE_KEY);
+    state.coverage = {};
+    seedCoverage();
+    renderAll();
+    toast('Reset complete', 'All coverage data cleared', 'info');
+  });
+
+  // File input + drop zone
+  const fileInput = document.getElementById('fileInput');
+  const dropZone = document.getElementById('dropZone');
+  dropZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => handleFileImport(e.target.files[0]));
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    handleFileImport(e.dataTransfer.files[0]);
+  });
+
+  // Dashboard refresh
+  document.getElementById('btnRefreshDash').addEventListener('click', () => {
+    renderDashboard();
+    toast('Refreshed', 'Dashboard data recomputed', 'info');
+  });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    // Cmd/Ctrl + K → focus search
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      document.getElementById('globalSearch').focus();
+    }
+    // Esc → close panels / modals
+    if (e.key === 'Escape') {
+      if (document.getElementById('modalBackdrop').classList.contains('open')) hideModal();
+      else if (document.getElementById('detailPanel').classList.contains('open')) closeDetail();
+    }
+    // ? → help
+    if (e.key === '?' && !['INPUT','TEXTAREA'].includes(e.target.tagName)) {
+      modalHelp();
+    }
+    // 1-4 → quick view switch
+    if (!['INPUT','TEXTAREA'].includes(e.target.tagName)) {
+      if (e.key === '1') switchView('dashboard');
+      if (e.key === '2') switchView('matrix');
+      if (e.key === '3') switchView('analytics');
+      if (e.key === '4') switchView('io');
+    }
+  });
+
+  document.getElementById('btnHelp').addEventListener('click', modalHelp);
+
+  // Init
+  init();
+});
+
+function modalHelp() {
+  showModal('Keyboard Shortcuts',
+    `
+    <div style="display:flex;flex-direction:column;gap:10px;font-size:12px">
+      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-faint)"><span>Focus search</span><kbd style="font-family:var(--font-mono);background:var(--bg-base);padding:2px 6px;border:1px solid var(--border);border-radius:3px">⌘ K</kbd></div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-faint)"><span>Close panel/modal</span><kbd style="font-family:var(--font-mono);background:var(--bg-base);padding:2px 6px;border:1px solid var(--border);border-radius:3px">Esc</kbd></div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-faint)"><span>Dashboard</span><kbd style="font-family:var(--font-mono);background:var(--bg-base);padding:2px 6px;border:1px solid var(--border);border-radius:3px">1</kbd></div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-faint)"><span>Matrix</span><kbd style="font-family:var(--font-mono);background:var(--bg-base);padding:2px 6px;border:1px solid var(--border);border-radius:3px">2</kbd></div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-faint)"><span>Analytics</span><kbd style="font-family:var(--font-mono);background:var(--bg-base);padding:2px 6px;border:1px solid var(--border);border-radius:3px">3</kbd></div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-faint)"><span>Import / Export</span><kbd style="font-family:var(--font-mono);background:var(--bg-base);padding:2px 6px;border:1px solid var(--border);border-radius:3px">4</kbd></div>
+      <div style="display:flex;justify-content:space-between;padding:6px 0"><span>Toggle sub-techniques</span><span style="font-family:var(--font-mono);color:var(--text-muted)">double-click card</span></div>
+    </div>
+    `,
+    `<button class="btn btn-primary" onclick="document.getElementById('modalBackdrop').classList.remove('open')">Got it</button>`
+  );
+}
+
+
+/* ============================================================================
+   12. INIT
+   ============================================================================ */
+
+function init() {
+  // 1. Seed defaults for every known technique
+  seedCoverage();
+
+  // 2. Hydrate from localStorage if present
+  const stored = load();
+  if (stored) {
+    for (const [k, v] of Object.entries(stored)) {
+      if (state.coverage[k]) state.coverage[k] = { ...state.coverage[k], ...v };
+      else state.coverage[k] = v;
+    }
+  } else {
+    // First run — auto-load the sample dataset
+    loadSampleDataset();
+    save();
+  }
+
+  // 3. Render
+  renderAll();
+}
+
+</script>
+</body>
+</html>
